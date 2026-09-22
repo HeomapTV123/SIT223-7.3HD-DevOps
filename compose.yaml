@@ -1,0 +1,25 @@
+name: sit223-hd-task-manager
+services:
+  app:
+    build:
+      context: .
+      target: runtime
+      args:
+        APP_VERSION: dev
+    image: sit223-hd-task-manager:dev
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      APP_ENV: development
+    volumes:
+      - task-data:/app/data
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  task-data:

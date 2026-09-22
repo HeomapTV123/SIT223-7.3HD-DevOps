@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A small task management application with persistent storage.">
+  <title>Taskboard</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Taskboard home"><span class="brand-mark" aria-hidden="true">✓</span> Taskboard</a>
+    <div class="environment"><span class="status-dot" aria-hidden="true"></span><span id="environment">Connecting…</span><span class="version" id="version"></span></div>
+  </header>
+  <main>
+    <div class="intro"><div><p class="eyebrow">TASK MANAGEMENT</p><h1>A little more organised.</h1><p class="subtitle">Plan your tasks, track progress and keep the next step in sight.</p></div><span class="today" id="today"></span></div>
+    <section class="stats" aria-label="Task statistics">
+      <div class="stat"><span class="stat-label">Open</span><strong id="stat-open">0</strong><span class="stat-note">Ready to start</span></div>
+      <div class="stat"><span class="stat-label">In progress</span><strong id="stat-progress">0</strong><span class="stat-note">Work underway</span></div>
+      <div class="stat"><span class="stat-label">Completed</span><strong id="stat-done">0</strong><span class="stat-note">Off your list</span></div>
+      <div class="stat"><span class="stat-label">Overdue</span><strong id="stat-overdue">0</strong><span class="stat-note">Needs attention</span></div>
+    </section>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div class="workspace">
+      <section class="panel task-form-panel" aria-labelledby="form-heading">
+        <div class="panel-heading"><h2 id="form-heading">Add a task</h2><p>Make room for your next idea.</p></div>
+        <form id="task-form">
+          <input id="task-id" type="hidden">
+          <label for="title">Task title <span class="required">*</span></label>
+          <input id="title" name="title" maxlength="120" placeholder="What needs to get done?" required>
+          <label for="description">Notes</label>
+          <textarea id="description" name="description" rows="4" maxlength="1000" placeholder="Add a little context…"></textarea>
+          <div class="form-row"><div><label for="priority">Priority</label><select id="priority" name="priority"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></div><div><label for="dueDate">Due date</label><input type="date" id="dueDate" name="dueDate"></div></div>
+          <label for="status">Status</label><select id="status" name="status"><option value="open">Open</option><option value="in_progress">In progress</option><option value="done">Done</option></select>
+          <div class="form-actions"><button class="primary" id="save-button" type="submit">Add task</button><button id="cancel-edit" class="secondary" type="button" hidden>Cancel edit</button></div>
+        </form>
+      </section>
+      <section class="panel tasks-panel" aria-labelledby="tasks-heading">
+        <div class="tasks-header"><h2 id="tasks-heading">Your tasks <span id="task-count" class="count">0</span></h2><button id="refresh" class="secondary" type="button">Refresh</button></div>
+        <form id="search-form" class="filters">
+          <div class="search-field"><label class="visually-hidden" for="search">Search tasks</label><input type="search" id="search" maxlength="100" placeholder="Search tasks…"><button class="search-button" type="submit">Search</button></div>
+          <label class="visually-hidden" for="filter-status">Filter by status</label><select id="filter-status"><option value="">All statuses</option><option value="open">Open</option><option value="in_progress">In progress</option><option value="done">Done</option></select>
+          <label class="visually-hidden" for="filter-priority">Filter by priority</label><select id="filter-priority"><option value="">All priorities</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select>
+        </form>
+        <div id="task-list" class="task-list" aria-live="polite"></div>
+        <div id="empty" class="empty" hidden><span class="empty-mark" aria-hidden="true">✓</span><h3 id="empty-heading">A fresh start</h3><p id="empty-description">Add your first task using the form.</p></div>
+      </section>
+    </div>
+    <footer><span>Tasks are saved automatically.</span><span id="footer-count">0 tasks in total</span></footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "sit223-hd-task-manager",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Task management application for the SIT223 Jenkins DevOps pipeline",
+  "engines": { "node": ">=24.11.0 <25" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test",
+    "test:ci": "node scripts/ci-report.js"
+  }
+}
