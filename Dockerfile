@@ -32,6 +32,7 @@ FROM base AS test
 RUN mkdir -p /app/reports && chown node:node /app/reports
 COPY test ./test
 COPY scripts/ci-report.js ./scripts/ci-report.js
+COPY scripts/smoke-deploy.mjs ./scripts/smoke-deploy.mjs
 USER node
 CMD ["node", "scripts/ci-report.js"]
 

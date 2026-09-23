@@ -1,0 +1,27 @@
+name: sit223-hd-staging
+services:
+  app:
+    image: ${STAGING_IMAGE:?Set STAGING_IMAGE to the image ID that passed the pipeline}
+    pull_policy: never
+    container_name: sit223-hd-staging
+    ports:
+      - "127.0.0.1:3001:3000"
+    environment:
+      APP_ENV: staging
+    volumes:
+      - staging-data:/app/data
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  staging-data:

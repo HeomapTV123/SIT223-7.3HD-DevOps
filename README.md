@@ -2,7 +2,7 @@
 
 Taskboard is a small application for the SIT223 7.3HD Jenkins DevOps task. It provides real features that can be built, tested, deployed and monitored: task creation, editing, completion, deletion, searching, filtering and database persistence.
 
-The Jenkinsfile now includes **Build, Test, Code Quality, and Security**. Windows Jenkins build #4 passed the first three stages, including all 37 tests, coverage import, and the SonarQube Cloud quality gate. Trivy then blocked the build on HIGH/CRITICAL packages in the image; its source scan found no secret patterns. The image changes below address that result and need a new Windows Jenkins run. The full assessment still needs Deploy, Release, and Monitoring with automatic notifications, followed by the demonstration video and report.
+The Jenkinsfile now includes **Build, Test, Code Quality, Security, and Deploy**. Windows Jenkins build #5 verified the first four stages after the smaller runtime image replaced the image blocked in build #4. The new Deploy stage starts a separate staging application, checks it and attempts image rollback on failure; its first Windows Jenkins run is still required. Release and Monitoring with automatic notifications remain to be implemented, followed by the demonstration video and report.
 
 ## Start here on Windows
 
@@ -16,7 +16,7 @@ Requirements already checked on your computer: Node.js 24.11.0, Git, Docker Desk
 npm test
 ```
 
-The expected result is **37 tests, 37 passed, 0 failed**. Node.js 24.11 may print an experimental warning for its built-in SQLite module; the test exit status and final summary determine the result. No third-party npm packages are required by this application.
+The expected result is **42 tests, 42 passed, 0 failed**: the original 37 application tests and five tests of deployment-check behaviour. Node.js 24.11 may print an experimental warning for its built-in SQLite module; the test exit status and final summary determine the result. No third-party npm packages are required by this application.
 
 4. Build and start the development container:
 
@@ -71,12 +71,14 @@ The application uses Node.js 24 and its built-in HTTP server, SQLite module and 
 | `src/validation.js` | Validation of task fields, dates, IDs and filters. |
 | `src/metrics.js` | Prometheus text-format metrics with fixed route labels. |
 | `public/` | Browser interface. |
-| `test/` | 37 automated validation, storage and HTTP integration tests. |
+| `test/` | 42 automated validation, storage, HTTP integration and deployment-check tests. |
 | `scripts/ci-report.js` | Runs tests with coverage thresholds and writes JUnit and LCOV reports. |
 | `scripts/healthcheck.js` | Checks that the running application and database are ready. |
+| `scripts/smoke-deploy.mjs` | Checks a deployed app's identity, browser assets, task operations and metrics; cleans up its temporary task. |
 | `Dockerfile` | Defines separate test and runtime images from a common base. |
 | `compose.yaml` | Runs the local development application with persistent storage. |
-| `Jenkinsfile` | Build, Test, Code Quality, and Security automation for Windows Jenkins. |
+| `compose.staging.yaml` | Defines the staging environment using an existing image, a separate database volume and localhost port 3001. |
+| `Jenkinsfile` | Build, Test, Code Quality, Security, and Deploy automation for Windows Jenkins. |
 | `sonar-project.properties` | SonarQube Cloud project identifiers, source scope, coverage import, and quality-gate settings. |
 | `ci/secrets-report.tpl` | Produces a secret-scan report containing locations and rule details without secret values or source snippets. |
 
@@ -93,7 +95,7 @@ This command runs the same tests and produces:
 
 The coverage thresholds are 85% lines, 75% branches and 85% functions. A test or threshold failure returns a nonzero exit code so the pipeline can stop.
 
-Coverage is scoped to the four backend modules `app.js`, `store.js`, `validation.js` and `metrics.js`. It excludes the startup entry point, frontend JavaScript and helper scripts. Backend coverage therefore does not describe the entire application's test coverage. Startup and browser behaviour need separate checks.
+Coverage measures the four backend modules `app.js`, `store.js`, `validation.js` and `metrics.js`, plus `scripts/smoke-deploy.mjs`. It excludes the startup entry point, frontend JavaScript and other helper scripts. These percentages therefore do not describe the entire application's coverage. The Deploy stage separately checks the running service; interactive browser behaviour still needs a manual check.
 
 The automated tests check real behaviour, including task lifecycles, combined filters, incorrect input, persistence after reopening SQLite, SQL-looking input, browser security headers, cross-origin rejection, health failures and the metrics response.
 
@@ -121,16 +123,17 @@ This uses `data/tasks.db` in the project folder. It is a different database from
 
 Use the included Jenkinsfile after this folder has been committed to your own GitHub repository. Configure the new job as **Pipeline script from SCM**, with Git as SCM and `Jenkinsfile` as the script path. Jenkins checks out the repository automatically. The JUnit plugin must be installed to publish the test results.
 
-This Jenkinsfile defines four assessed stages:
+This Jenkinsfile defines five assessed stages:
 
 1. **Build** refreshes the base images and packages, creates a runtime image tagged with the Jenkins build number, stores it in the local Docker image store, and archives its metadata and Node version.
 2. **Test** builds the test image with the same application layers and build version, runs the tests in a container, copies the reports into the Jenkins workspace and publishes them. Tests or coverage failures fail the stage. The temporary test container is removed afterward.
 3. **Code Quality** runs SonarScanner in Docker, imports the LCOV report, submits analysis to SonarQube Cloud and waits for the quality gate. A rejected gate, processing timeout, authentication failure or scanner error fails the stage. The scanner container is removed afterward, and any generated analysis-task metadata and scanner-image metadata are archived.
 4. **Security** runs Trivy against an exported copy of the runtime image and scans the checked-out source for secret patterns. It records all vulnerability severities and fails on any HIGH/CRITICAL image vulnerability or any detected source secret. Reports are archived even on failure. Scanner errors and missing reports also fail the stage.
+5. **Deploy** uses Docker Compose to run that same image in staging. It waits for Docker health, checks the deployed image ID, runs HTTP smoke checks and checks the published Windows-host port. A failed deployment triggers recovery and fails the build. Deployment evidence is archived on success or failure.
 
 Each runtime image has `APP_VERSION` set to its build identifier. The app displays that value and exposes it through `/health` and `/api/info` so a later deployment can be matched to the build that produced it.
 
-This pipeline uses `bat` because the Jenkins executor is Windows, even though the containers themselves run Linux. Build #3 passed Build, Test and Code Quality. Build #4 checked out commit `ca349540de615a2698360bf134526bb4542f94e3`, built `sit223-hd-task-manager:build-4`, passed all 37 tests and the SonarQube Cloud quality gate, then failed the Security policy on image findings. Run the updated pipeline to assess the replacement image. The overall timeout is 30 minutes to allow base-image, scanner and vulnerability-database downloads.
+This pipeline uses Windows `bat` steps and a PowerShell host-health request, while its containers run Linux. Build #4 failed Security on image findings. Build #5 checked out commit `625d53b1a7819ec85a79ac074b9c4c8fdc2e2449`, built `sit223-hd-task-manager:build-5`, passed all 37 tests then present, passed SonarQube and passed Security. The expanded 42-test suite and Deploy stage still need a new Windows Jenkins run. The pipeline timeout is 30 minutes; Deploy has its own five-minute limit.
 
 ## Configure SonarQube Cloud
 
@@ -146,7 +149,7 @@ The first run downloads the official scanner image `sonarsource/sonar-scanner-cl
 
 `sonar.qualitygate.wait=true` makes the scanner poll SonarQube Cloud for up to 300 seconds after submission. A failed gate or timeout returns an error to Jenkins, blocking later stages. The connection is outbound from Jenkins, so this setup works with local Jenkins without a public webhook endpoint. The source revision is passed from Jenkins' Git checkout to identify the scanned commit. `sonar.projectVersion=1.0.0` is the application version, kept stable across CI builds; update it when preparing a new application release rather than on every build.
 
-Static analysis covers `src`, `public` and `scripts`, with `test` classified as test code. The existing coverage report measures four backend modules. Uncovered frontend, bootstrap and helper code remains visible in SonarQube's overall coverage, so it will differ from the backend-only coverage printed by the Test stage. No source files or quality rules are excluded to force a passing gate.
+Static analysis covers `src`, `public` and `scripts`, with `test` classified as test code. The coverage report measures four backend modules and the deployment smoke script. Uncovered frontend, bootstrap and other helper code remains visible in SonarQube's overall coverage, so it will differ from the Test stage's scoped percentages. No source files or quality rules are excluded to force a passing gate.
 
 For assessment evidence, keep the Jenkins **Code Quality** output, the matching [SonarQube Cloud dashboard](https://sonarcloud.io/dashboard?id=HeomapTV123_SIT223-7.3HD-DevOps), quality-gate conditions and representative findings. A first analysis can establish a new-code baseline; inspect overall-code issues and coverage as well as the gate status. A successful upload by itself is not evidence that the quality gate passed.
 
@@ -164,13 +167,13 @@ Security uses the official `aquasec/trivy:0.74.0` Docker image. No additional Je
 
 After the Security changes are merged into `main`, select **Build Now** in the existing Jenkins job. Open **Console Output** and inspect the fourth stage. The source is mounted read-only in Trivy, and its reports are written to a separate writable mount. The SonarQube token is scoped to the earlier Code Quality stage and is not passed to Trivy.
 
-The image scan uses `docker image save` to export the same runtime image created by Build, then scans that archive using `trivy image --input`. This works with the Linux engine behind Windows Docker Desktop without sharing its Docker socket with the scanner. The temporary archive is removed in cleanup and is not archived as a Jenkins report.
+Build records the runtime's immutable image ID. Security uses `docker image save` with that ID, then scans the archive using `trivy image --input`; Deploy uses the same ID. This works with the Linux engine behind Windows Docker Desktop without sharing its Docker socket with the scanner. The temporary archive is removed in cleanup and is not archived as a Jenkins report.
 
 ### Scope and policy
 
 | Check | Scope | Blocking rule |
 | --- | --- | --- |
-| Image vulnerabilities | OS packages and supported language packages detected in the runtime image, including the base image | Any HIGH or CRITICAL vulnerability, even if no fixed version is available |
+| Image vulnerabilities | OS packages and supported language packages detected in the runtime image, within the scanner's data-source coverage | Any detected HIGH or CRITICAL vulnerability; no fixed-version filter |
 | Source secrets | Current checked-out files inspected with Trivy's built-in secret rules | Any reported secret, at any severity |
 | Scanner health | Scan commands, report creation, and report conversion | Command failure, timeout, malformed input, or missing required report |
 
@@ -179,6 +182,8 @@ The full image JSON and text reports include UNKNOWN, LOW, MEDIUM, HIGH, and CRI
 The source scan skips generated reports, coverage, database data, installed modules, `.scannerwork`, and Git metadata. Trivy's built-in allowed paths and binary/lock-file skip patterns also apply. This checks the current working tree, not deleted secrets in Git history. `ci/secrets-report.tpl` reports only file path, rule ID, severity, and line number; it does not print matched secret values or surrounding source lines. A clean scan means no configured patterns were detected in that scope.
 
 This application has no third-party npm dependencies, so `npm audit` alone would have very little scope. Scanning the built image also assesses the packaged operating system and supported packages shipped with the runtime. These checks complement the functional tests and SonarQube analysis.
+
+Alpine's advisory coverage differs from Debian's. Trivy's Alpine documentation lists unfixed vulnerabilities as unsupported. A passing scan therefore means no blocking findings were detected within that coverage, not that all possible vulnerabilities have been ruled out. Keep this limitation with the before/after assessment evidence.
 
 ### Reports and evidence
 
@@ -221,17 +226,63 @@ These are 60 package-level advisory matches, not 60 distinct CVEs; several advis
 
 The replacement image uses a refreshed Alpine base and copies only the Node executable from the compatible official Node image. It omits the Debian utilities and npm/Yarn package trees that the application does not need. The HIGH/CRITICAL and source-secret blocking rules remain unchanged. This reduces the packaged components; only a new scan can establish the new image's findings and gate outcome.
 
-Keep build #4's console output and archived reports as the original evidence. After merging the image changes, select **Build Now**, collect the new reports, and check the application and SQLite persistence with the new image. Do not claim remediation passed until that run verifies it.
+Build #5 completed the replacement-image run successfully: Docker built Alpine 3.24.2, all 37 tests then present passed, SonarQube passed, the HIGH/CRITICAL table reported zero findings for both the OS and application package target, and the source scan found no secret patterns. Its console ended with `Finished: SUCCESS`. This verifies the configured gate, rather than proving the absence of every vulnerability. The log's EOL-list warning reflects missing Alpine 3.24 support-date metadata in Trivy 0.74.0; scanning continued.
+
+Keep build #4's console and reports alongside build #5's reports. The new Deploy stage will also exercise the running Alpine application and its database volume; collect that separate result before claiming deployment validation.
+
+## Run the Deploy stage
+
+Deploy runs only after Build, Test, Code Quality and Security pass. It uses Docker Compose v2 with `up --wait` and `--wait-timeout` support, as provided by current Docker Desktop. The Windows `powershell` step comes from Jenkins' existing Pipeline: Nodes and Processes plugin. The smoke client uses Node from the built image, so Jenkins does not need Node on its Windows PATH for deployment. No new credential is required.
+
+| Environment | Browser URL | Container | Database volume |
+| --- | --- | --- | --- |
+| Development (manual Compose) | `http://localhost:3000` | Managed by `compose.yaml` | `sit223-hd-task-manager_task-data` |
+| Staging (Jenkins Deploy) | `http://localhost:3001` | `sit223-hd-staging` | `sit223-hd-staging_staging-data` |
+
+The staging service runs as the image's non-root user, has a read-only root filesystem and writable data volume, and binds only to the Jenkins computer's loopback address. It remains running after a successful pipeline so it can be inspected in a browser. These are separate environments on the same Docker engine, not separate physical servers or a public deployment.
+
+### First deployment and evidence
+
+1. Review and merge the Deploy pull request into `main`. Keep Docker Desktop running and ensure port 3001 is available.
+2. Run the existing Jenkins job. If **Build with Parameters** is shown, leave **VERIFY_STAGING_ROLLBACK** unchecked for a normal deployment. The first run after merging may still show **Build Now** until Jenkins loads the parameter definition.
+3. Confirm all 42 tests and both gates pass, followed by the fifth stage, **Deploy**. Compose waits up to 90 seconds for the image's health check; startup failure or timeout blocks the stage.
+4. Open `http://localhost:3001` on the Jenkins computer. The page should identify the environment as `staging` and show the current `build-N` version. Open `/health` to confirm those values and `status: ok`.
+5. Create a task manually and refresh the page. After another normal Jenkins deployment, confirm that task is still there. The named volume is reused; the pipeline's smoke checks delete only the temporary task they create.
+6. Save the five-stage pipeline screenshot, staging page and the build's **Artifacts > reports > deploy** files. The archive page can download that directory as a ZIP.
+
+The smoke client checks health and release identity before writing anything, then checks HTML/CSS/JavaScript responses, creates a unique task, reads and filters it, marks it done, checks metrics and deletes it. It fails on any unexpected response, including cleanup failure. A separate Windows-host health request verifies the published port, rather than relying solely on HTTP within Docker.
+
+| Deployment artifact | Purpose |
+| --- | --- |
+| `deployment-context.txt` | Build, commit, image ID, environment, URL and rollback-demo setting |
+| `deployment-result.txt` | `PASSED`, `FAILED` or `NOT_COMPLETED`; passing requires every deployment check |
+| `compose-version.txt` | Compose version used by Jenkins |
+| `previous-image.txt`, `previous-container.json` | Previous staging image and configuration; container JSON exists only when staging already existed |
+| `smoke-test.json` | Individual HTTP-check results and timestamps |
+| `host-health.json` | Response from the Windows host's published staging endpoint |
+| `final-container.json`, `final-container.log` | Container state and recent logs after deployment or recovery |
+| `failed-container.json`, `failed-container.log`, `rollback-result.txt` | Failed attempt and recovery outcome, when applicable |
+
+Missing reports after interruption or an early error are not a passing result. `NOT_COMPLETED` is written before deployment starts and replaced only when the attempt completes. Empty `*-inspect-error.txt` files mean that inspection produced no error output.
+
+### Failure handling and rollback demonstration
+
+Before replacing an existing staging container, Jenkins checks its Compose project/service labels and records its image ID. It refuses to replace a same-name container owned by another project. A failed startup, image mismatch, smoke check or host-health request triggers an attempt to restore the previous image and wait for Docker health. A successful rollback still leaves the Jenkins build failed so the rejected change cannot be promoted. On the first deployment, there is no previous image: Jenkins stops the failed service and preserves the volume.
+
+After one normal deployment succeeds, an optional **Build with Parameters > VERIFY_STAGING_ROLLBACK** run deliberately fails Deploy after its checks pass. Jenkins then attempts to restore the previous image. Use the failed build's `deployment-result.txt`, `rollback-result.txt` and container metadata, plus the restored browser version, as real rollback evidence. Leave the option unchecked on subsequent normal runs. The flag does not skip tests, quality analysis or security scanning.
+
+Rollback restores the previous application image using the current Compose configuration. It does not restore database contents or undo schema migrations. Future schema changes must remain compatible with the previous application version or have a separate reviewed recovery plan. Replacing a single staging container causes brief downtime. Abrupt Jenkins/Docker shutdown or a hard timeout can interrupt recovery; inspect Docker Desktop and the artifacts before retrying. Use only one Jenkins job for this fixed staging project.
+
+For a port conflict, free port 3001 or deliberately change the staging port consistently in Compose and the Jenkins URL. For a health or smoke failure, read the failed-container log and `smoke-test.json`; for an unknown Compose option, check Docker Desktop's Compose version. Do not delete the staging data volume to make an error disappear.
 
 ## Remaining stages to implement
 
 | Assessed stage | Next implementation |
 | --- | --- |
-| Deploy | Automatically run the built image in a separate staging environment, then check health and application behaviour. |
 | Release | Promote the same tested image to a separate production demonstration environment, with its own configuration and database volume. Verify the release and provide rollback handling. |
 | Monitoring and Alerting | Collect the application's metrics with Prometheus, configure alert rules and a working notification receiver, then demonstrate a failure and recovery. |
 
-The current `/metrics` endpoint is preparation for monitoring. A running collector and actual alert delivery are still required. Similarly, running Compose manually is the local development check; the assessed Deploy and Release stages need their own automation.
+The current `/metrics` endpoint and its Deploy check are preparation for monitoring. A running collector and actual alert delivery are still required. Deploy automation is now prepared and needs its real Jenkins verification; Release automation is the next implementation after that.
 
 ## Assessment evidence to collect as we progress
 
@@ -247,13 +298,19 @@ The user's Windows Jenkins build #3 resolved the earlier automatic-analysis conf
 
 The user's Windows Jenkins build #4 verified the Security container mounts, image scan, source-secret report template, report archiving and blocking gate. It failed on 56 HIGH and 4 CRITICAL package-level image findings, while the source scan reported no secret patterns. Build, Test and Code Quality passed in that same run.
 
-Docker, Jenkins and Trivy execution are unavailable in the preparation environment. The new Alpine image, non-root report generation and its scan outcome still require a Windows Jenkins run; a local test pass does not establish container compatibility or a passing security gate. Generate and use those real reports for assessment evidence.
+The user's Windows Jenkins build #5 verified the Alpine image, non-root test reports, SonarQube and the configured Security gate. The source-secret scan found no patterns and the displayed HIGH/CRITICAL image results were zero.
+
+The new 42-test suite passed locally on Node.js 24.19.0, with 100% lines, 98.97% branches and 100% functions across the four backend modules and smoke script. JUnit contains 42 cases without failures, and all five LCOV source paths resolve. The smoke tests cover real HTTP requests, wrong release/environment rejection, failure cleanup and a nonzero CLI exit status.
+
+Docker, Jenkins, Windows PowerShell and Trivy execution are unavailable in the preparation environment. The staging Compose launch, published Windows port, bind mount and rollback still need real Windows Jenkins runs. The local tests do not establish that those integration steps succeeded. Generate and use those real deployment reports for assessment evidence.
 
 ## Technical references
 
 - [Node.js test runner](https://nodejs.org/docs/latest-v24.x/api/test.html)
 - [Node.js SQLite module](https://nodejs.org/api/sqlite.html)
 - [Docker multi-stage builds](https://docs.docker.com/build/building/multi-stage/)
+- [Docker Compose deployment and health waiting](https://docs.docker.com/reference/cli/docker/compose/up/)
+- [Docker named volumes and persistence](https://docs.docker.com/engine/storage/volumes/)
 - [Official Node image guidance for a smaller runtime without npm/Yarn](https://github.com/nodejs/docker-node/blob/main/docs/BestPractices.md#smaller-images-without-npmyarn)
 - [Official Node 24 Alpine 3.24 image definition](https://github.com/nodejs/docker-node/blob/main/24/alpine3.24/Dockerfile)
 - [Docker build options for pulling base images and disabling cache](https://docs.docker.com/reference/cli/docker/buildx/build/)
@@ -265,3 +322,4 @@ Docker, Jenkins and Trivy execution are unavailable in the preparation environme
 - [Trivy container image scanning, including exported archives](https://trivy.dev/docs/latest/guide/target/container_image/)
 - [Trivy report conversion and severity gate options](https://trivy.dev/docs/latest/guide/references/configuration/cli/trivy_convert/)
 - [Trivy secret scanning and built-in exclusions](https://trivy.dev/docs/latest/guide/scanner/secret/)
+- [Trivy Alpine vulnerability-coverage limitations](https://trivy.dev/docs/v0.74/guide/coverage/os/alpine/)
