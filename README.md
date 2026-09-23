@@ -2,7 +2,7 @@
 
 Taskboard is a small application for the SIT223 7.3HD Jenkins DevOps task. It provides real features that can be built, tested, deployed and monitored: task creation, editing, completion, deletion, searching, filtering and database persistence.
 
-This package is the first implementation milestone. The application and a starter Jenkinsfile for **Build and Test** are included. The full assessment still needs Code Quality, Security, Deploy, Release, and Monitoring with automatic notifications, followed by the demonstration video and report.
+The Jenkinsfile now includes **Build, Test, and Code Quality**. Build and Test passed in Windows Jenkins build #1 with 37 passing tests. Code Quality is configured for SonarQube Cloud and needs its first authenticated Jenkins run. The full assessment still needs Security, Deploy, Release, and Monitoring with automatic notifications, followed by the demonstration video and report.
 
 ## Start here on Windows
 
@@ -76,7 +76,8 @@ The application uses Node.js 24 and its built-in HTTP server, SQLite module and 
 | `scripts/healthcheck.js` | Checks that the running application and database are ready. |
 | `Dockerfile` | Defines separate test and runtime images from a common base. |
 | `compose.yaml` | Runs the local development application with persistent storage. |
-| `Jenkinsfile` | Initial Build and Test automation for Windows Jenkins. |
+| `Jenkinsfile` | Build, Test, and Code Quality automation for Windows Jenkins. |
+| `sonar-project.properties` | SonarQube Cloud project identifiers, source scope, coverage import, and quality-gate settings. |
 
 ## How to run tests with reports
 
@@ -87,7 +88,7 @@ npm run test:ci
 This command runs the same tests and produces:
 
 - `reports/junit.xml`: test results suitable for Jenkins' JUnit plugin.
-- `reports/lcov.info`: coverage data for later code-quality analysis.
+- `reports/lcov.info`: coverage data imported by the Code Quality stage.
 
 The coverage thresholds are 85% lines, 75% branches and 85% functions. A test or threshold failure returns a nonzero exit code so the pipeline can stop.
 
@@ -111,24 +112,50 @@ npm start
 
 This uses `data/tasks.db` in the project folder. It is a different database from the Docker volume. Use Ctrl+C to stop it.
 
-## Starter Jenkins pipeline
+## Jenkins pipeline
 
 Use the included Jenkinsfile after this folder has been committed to your own GitHub repository. Configure the new job as **Pipeline script from SCM**, with Git as SCM and `Jenkinsfile` as the script path. Jenkins checks out the repository automatically. The JUnit plugin must be installed to publish the test results.
 
-This Jenkinsfile has two assessed stages:
+This Jenkinsfile defines three assessed stages:
 
 1. **Build** creates a runtime image tagged with the Jenkins build number, stores it in the local Docker image store and archives its metadata.
 2. **Test** builds the test image, runs the tests in a container, copies the reports into the Jenkins workspace and publishes them. Tests or coverage failures fail the stage. The temporary test container is removed afterward.
+3. **Code Quality** runs SonarScanner in Docker, imports the LCOV report, submits analysis to SonarQube Cloud and waits for the quality gate. A rejected gate, processing timeout, authentication failure or scanner error fails the stage. The scanner container is removed afterward, and any generated analysis-task metadata and scanner-image metadata are archived.
 
 Each runtime image has `APP_VERSION` set to its build identifier. The app displays that value and exposes it through `/health` and `/api/info` so a later deployment can be matched to the build that produced it.
 
-This pipeline uses `bat` because your Jenkins executor is Windows, even though the containers themselves run Linux. Docker access from Jenkins has already been demonstrated with your successful hello-world job. The project-specific Docker images and Jenkinsfile still need their first run on your computer.
+This pipeline uses `bat` because the Jenkins executor is Windows, even though the containers themselves run Linux. Build #1 checked out commit `bb72e9836f6a42b0d199aabac9d83d01edb8ec67`, built the application image and passed all 37 tests. Run the updated pipeline to verify Code Quality against the real SonarQube Cloud project.
+
+## Configure SonarQube Cloud
+
+The configuration targets organization `heomaptv123`, project `HeomapTV123_SIT223-7.3HD-DevOps`, and the EU service at `https://sonarcloud.io`.
+
+1. Open the project's [Analysis Method page](https://sonarcloud.io/project/configuration/AutoScan?id=HeomapTV123_SIT223-7.3HD-DevOps). Under **Administration > Analysis Method**, turn **Automatic Analysis off** so Jenkins can submit CI analysis.
+2. In SonarQube Cloud, open **My account > Access Tokens > Personal Tokens**. Generate a token for Jenkins with an expiry covering the assessment period. The account must be allowed to execute analysis for this project.
+3. In Jenkins, open **Manage Jenkins > Credentials > System > Global credentials (unrestricted) > Add Credentials**. Choose **Secret text**, scope **Global**, paste the token into **Secret**, and set the ID to **`sonarcloud-token`**. Keep the token out of source files, commands, screenshots and chat.
+4. Confirm that the Jenkins **Credentials Binding** plugin is installed and enabled. The existing Git, Pipeline and JUnit plugins are also used. This Docker scanner setup does not require a separate SonarQube Jenkins plugin or a scanner installation on Windows.
+5. Configure the Jenkins job to load `Jenkinsfile` from `*/main`. After these changes are merged to `main`, keep Docker Desktop running and select **Build Now**.
+
+The first run downloads the official scanner image `sonarsource/sonar-scanner-cli:12.2.0.4256_8.1.0`. Its release tag is pinned in the Jenkinsfile and its image metadata is archived for traceability. The Windows workspace is mounted at `/usr/src` inside the scanner container; LCOV entries such as `SF:src/app.js` resolve against that directory. Jenkins supplies `SONAR_TOKEN` only while running the scanner, and Docker inherits it by environment-variable name.
+
+`sonar.qualitygate.wait=true` makes the scanner poll SonarQube Cloud for up to 300 seconds after submission. A failed gate or timeout returns an error to Jenkins, blocking later stages. The connection is outbound from Jenkins, so this setup works with local Jenkins without a public webhook endpoint. The source revision is passed from Jenkins' Git checkout to identify the scanned commit. `sonar.projectVersion=1.0.0` is the application version, kept stable across CI builds; update it when preparing a new application release rather than on every build.
+
+Static analysis covers `src`, `public` and `scripts`, with `test` classified as test code. The existing coverage report measures four backend modules. Uncovered frontend, bootstrap and helper code remains visible in SonarQube's overall coverage, so it will differ from the backend-only coverage printed by the Test stage. No source files or quality rules are excluded to force a passing gate.
+
+For assessment evidence, keep the Jenkins **Code Quality** output, the matching [SonarQube Cloud dashboard](https://sonarcloud.io/dashboard?id=HeomapTV123_SIT223-7.3HD-DevOps), quality-gate conditions and representative findings. A first analysis can establish a new-code baseline; inspect overall-code issues and coverage as well as the gate status. A successful upload by itself is not evidence that the quality gate passed.
+
+If the stage fails:
+
+- **Missing credential:** create a Secret text credential with the exact ID `sonarcloud-token`.
+- **Not authorized:** check the token expiry and the account's permission to analyse this project.
+- **Automatic analysis conflict:** turn Automatic Analysis off on the project's Analysis Method page.
+- **Quality gate failed:** open the dashboard, inspect the failing conditions, fix the code or add meaningful tests, commit and rerun.
+- **Connection or timeout error:** check Docker Desktop and network connectivity, then retry and preserve the actual outcome.
 
 ## Remaining stages to implement
 
 | Assessed stage | Next implementation |
 | --- | --- |
-| Code Quality | Connect SonarQube Cloud or another suitable analyser, import coverage, set thresholds and enforce the quality result. |
 | Security | Scan the application/image with a security tool such as Trivy; document findings, severity and remediation. This project has no third-party npm dependencies, so an npm audit alone would have very little scope. |
 | Deploy | Automatically run the built image in a separate staging environment, then check health and application behaviour. |
 | Release | Promote the same tested image to a separate production demonstration environment, with its own configuration and database volume. Verify the release and provide rollback handling. |
@@ -142,9 +169,11 @@ Keep screenshots and logs from your own execution: app features, Docker image/ve
 
 The final report uses the supplied Word template and is submitted as PDF. Include the demo video link, GitHub repository link, implemented-stage count, project description, pipeline screenshot and stage explanations. The video must be no longer than 10 minutes and include cloning/setup, pipeline operation and the deployed application. Both the marker and unit chair need access to the submitted resources.
 
-## Verification of this starter
+## Verification status
 
-The 37 automated backend tests passed on Node.js 24.19.0 in the preparation environment. Generated XML was checked to contain three test suites and 37 test cases without failures. The frontend JavaScript can be syntax-checked, but a browser executable and Docker daemon were unavailable in that environment. Browser, container and Jenkins execution remain to be checked on your Windows computer. Generate and use your own reports for assessment evidence.
+The 37 automated backend tests passed on Node.js 24.19.0 in the preparation environment. Generated XML was checked to contain three test suites and 37 test cases without failures. The user's Windows Jenkins build #1 also passed Build and Test, archived the reports, and recorded backend coverage of 100% lines, 99.37% branches and 100% functions. A user-provided browser screenshot demonstrated task creation in the running application.
+
+The Code Quality integration has been checked against the official scanner documentation and the generated relative LCOV paths. Docker and Jenkins are unavailable in the preparation environment, and no SonarQube token is available there. Its authenticated scanner run and quality-gate outcome must therefore be verified in Windows Jenkins. Generate and use the resulting real reports for assessment evidence.
 
 ## Technical references
 
@@ -152,3 +181,6 @@ The 37 automated backend tests passed on Node.js 24.19.0 in the preparation envi
 - [Node.js SQLite module](https://nodejs.org/api/sqlite.html)
 - [Docker multi-stage builds](https://docs.docker.com/build/building/multi-stage/)
 - [Jenkins Windows batch steps](https://www.jenkins.io/doc/pipeline/steps/workflow-durable-task-step/#bat-windows-batch-script)
+- [SonarScanner CLI](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/scanners/sonarscanner-cli)
+- [SonarQube Cloud analysis parameters and quality-gate polling](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/analysis-parameters/parameters-not-settable-in-ui)
+- [JavaScript LCOV coverage parameters](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/test-coverage/test-coverage-parameters)

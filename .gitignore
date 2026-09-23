@@ -2,6 +2,7 @@ node_modules/
 data/
 reports/
 coverage/
+.scannerwork/
 .env
 .env.*
 *.log
