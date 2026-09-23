@@ -2,7 +2,7 @@
 
 Taskboard is a small application for the SIT223 7.3HD Jenkins DevOps task. It provides real features that can be built, tested, deployed and monitored: task creation, editing, completion, deletion, searching, filtering and database persistence.
 
-The Jenkinsfile now includes **Build, Test, Code Quality, and Security**. Windows Jenkins build #3 passed the first three stages, including all 37 tests, coverage import, and the SonarQube Cloud quality gate. Security is prepared with Trivy and needs its first Windows Jenkins run. The full assessment still needs Deploy, Release, and Monitoring with automatic notifications, followed by the demonstration video and report.
+The Jenkinsfile now includes **Build, Test, Code Quality, and Security**. Windows Jenkins build #4 passed the first three stages, including all 37 tests, coverage import, and the SonarQube Cloud quality gate. Trivy then blocked the build on HIGH/CRITICAL packages in the image; its source scan found no secret patterns. The image changes below address that result and need a new Windows Jenkins run. The full assessment still needs Deploy, Release, and Monitoring with automatic notifications, followed by the demonstration video and report.
 
 ## Start here on Windows
 
@@ -25,7 +25,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-The first build downloads the Node.js base image. The application should eventually show `healthy` in the status column. Open [Taskboard](http://localhost:3000) in your browser.
+The first build downloads the Node.js donor image and Alpine base image. The application should eventually show `healthy` in the status column. Open [Taskboard](http://localhost:3000) in your browser.
 
 5. Add a task, change its status, edit its title and refresh the page. Your task should remain saved. Check [health](http://localhost:3000/health) and [metrics](http://localhost:3000/metrics) as well.
 
@@ -99,9 +99,13 @@ The automated tests check real behaviour, including task lifecycles, combined fi
 
 ## How the Docker images work
 
-The `base` stage copies the backend and browser assets. The `test` target adds the tests and report script. The `runtime` target runs the application as the non-root `node` user and includes a health check. The runtime image does not include the test directory.
+The `node-source` stage supplies only `/usr/local/bin/node` from `node:24-alpine3.24`. The `base` stage starts from `alpine:3.24`, updates its packages, installs `libstdc++` and its required libraries, then adds that Node executable, the backend and browser assets. This application has no third-party dependencies, so npm, Yarn and their bundled packages are not copied into the application image. A build check fails if npm dependencies are later added without updating this design.
 
-The default base image is `node:24-bookworm-slim`. Its exact digest can change as Node.js publishes updates. For the final assessed build, record the resulting image ID and base-image digest; a digest can also be supplied using the `NODE_IMAGE` build argument when reproducible rebuilding is required.
+The `test` target shares those application layers, adds the tests and report script, and runs `node scripts/ci-report.js` as the non-root `node` user. Its `/app/reports` directory is writable by that user. The `runtime` target is the default final target; it runs the application as `node`, includes a health check and excludes the tests. UID and GID remain 1000, preserving ownership compatibility with the existing SQLite volume. Local development commands can still use npm on the host.
+
+Alpine uses musl rather than Debian's glibc, so the complete tests and a running-application check must be repeated for this image. The Node donor and Alpine runtime must use the same Alpine release. Defaults can be overridden with the `NODE_IMAGE` and `ALPINE_IMAGE` build arguments; keep them compatible when doing so.
+
+Jenkins builds the runtime with `--pull --no-cache`, refreshing both base images and package installation, then lets the test target reuse that build's application layers and `APP_VERSION`. Tags and package repositories can change, so retain the build log's resolved image digests, `image-metadata.json`, `runtime-node-version.txt` and the security reports for the assessed artifact. Pinning both image digests fixes the base inputs, but package upgrades would still need a fixed package source for an exact rebuild.
 
 The Compose service publishes the application only on `127.0.0.1:3000`. Its root filesystem is read-only; the SQLite directory is writable through the named volume. This is a local coursework application without user authentication.
 
@@ -119,14 +123,14 @@ Use the included Jenkinsfile after this folder has been committed to your own Gi
 
 This Jenkinsfile defines four assessed stages:
 
-1. **Build** creates a runtime image tagged with the Jenkins build number, stores it in the local Docker image store and archives its metadata.
-2. **Test** builds the test image, runs the tests in a container, copies the reports into the Jenkins workspace and publishes them. Tests or coverage failures fail the stage. The temporary test container is removed afterward.
+1. **Build** refreshes the base images and packages, creates a runtime image tagged with the Jenkins build number, stores it in the local Docker image store, and archives its metadata and Node version.
+2. **Test** builds the test image with the same application layers and build version, runs the tests in a container, copies the reports into the Jenkins workspace and publishes them. Tests or coverage failures fail the stage. The temporary test container is removed afterward.
 3. **Code Quality** runs SonarScanner in Docker, imports the LCOV report, submits analysis to SonarQube Cloud and waits for the quality gate. A rejected gate, processing timeout, authentication failure or scanner error fails the stage. The scanner container is removed afterward, and any generated analysis-task metadata and scanner-image metadata are archived.
 4. **Security** runs Trivy against an exported copy of the runtime image and scans the checked-out source for secret patterns. It records all vulnerability severities and fails on any HIGH/CRITICAL image vulnerability or any detected source secret. Reports are archived even on failure. Scanner errors and missing reports also fail the stage.
 
 Each runtime image has `APP_VERSION` set to its build identifier. The app displays that value and exposes it through `/health` and `/api/info` so a later deployment can be matched to the build that produced it.
 
-This pipeline uses `bat` because the Jenkins executor is Windows, even though the containers themselves run Linux. Build #3 checked out commit `23e177ec533ffdd39df9a8e499a07c91ed07182e`, built `sit223-hd-task-manager:build-3`, passed all 37 tests, and reported `QUALITY GATE STATUS: PASSED` and `Finished: SUCCESS`. Run the updated pipeline to verify Security. The overall timeout is 30 minutes to allow the first scanner and vulnerability-database downloads.
+This pipeline uses `bat` because the Jenkins executor is Windows, even though the containers themselves run Linux. Build #3 passed Build, Test and Code Quality. Build #4 checked out commit `ca349540de615a2698360bf134526bb4542f94e3`, built `sit223-hd-task-manager:build-4`, passed all 37 tests and the SonarQube Cloud quality gate, then failed the Security policy on image findings. Run the updated pipeline to assess the replacement image. The overall timeout is 30 minutes to allow base-image, scanner and vulnerability-database downloads.
 
 ## Configure SonarQube Cloud
 
@@ -170,7 +174,7 @@ The image scan uses `docker image save` to export the same runtime image created
 | Source secrets | Current checked-out files inspected with Trivy's built-in secret rules | Any reported secret, at any severity |
 | Scanner health | Scan commands, report creation, and report conversion | Command failure, timeout, malformed input, or missing required report |
 
-The full image JSON and text reports include UNKNOWN, LOW, MEDIUM, HIGH, and CRITICAL results. The gate reads that same JSON, rather than performing a second vulnerability scan with a potentially different database. The collection command's `--exit-code 0` allows the complete report to be generated; the subsequent mandatory gate uses `--severity HIGH,CRITICAL --exit-code 10` and fails Jenkins when those findings exist. There is no `--ignore-unfixed` filter or CVE suppression file in this change.
+The full image JSON and text reports include UNKNOWN, LOW, MEDIUM, HIGH, and CRITICAL results. The gate reads that same JSON, rather than performing a second vulnerability scan with a potentially different database. The collection command's `--exit-code 0` allows the complete report to be generated; the subsequent mandatory gate uses `--severity HIGH,CRITICAL --exit-code 10` and fails Jenkins when those findings exist. Both report conversions specify `--scanners vuln` to render the vulnerability summary table. There is no `--ignore-unfixed` filter or CVE suppression file in this change.
 
 The source scan skips generated reports, coverage, database data, installed modules, `.scannerwork`, and Git metadata. Trivy's built-in allowed paths and binary/lock-file skip patterns also apply. This checks the current working tree, not deleted secrets in Git history. `ci/secrets-report.tpl` reports only file path, rule ID, severity, and line number; it does not print matched secret values or surrounding source lines. A clean scan means no configured patterns were detected in that scope.
 
@@ -198,12 +202,26 @@ For the assessment, capture the Security stage, its final outcome, and represent
 
 ### If Security fails
 
-- **HIGH/CRITICAL image findings:** inspect the package and fixed-version columns. Update the affected base image or package, rebuild, and retain both scan results to demonstrate remediation. For a base-image update, run `docker pull node:24-bookworm-slim` on the Jenkins computer before rerunning, or update the Dockerfile to a reviewed image/version. The replacement artifact must pass Build, Test, and Code Quality again.
+- **HIGH/CRITICAL image findings:** inspect the package, installed-version and fixed-version columns in `trivy-image.json`. Jenkins already pulls current base images and refreshes Alpine packages on every build. If findings remain, update the affected component or choose a reviewed compatible base, rebuild, and retain both reports. The replacement artifact must pass Build, Test, and Code Quality again.
 - **An unfixed HIGH/CRITICAL finding:** this policy still blocks it. Check the vendor advisory and choose a reviewed remediation or alternative base image. Any later policy exception needs a specific rationale and must be reported; do not silently suppress the finding to obtain a green build.
 - **Secret finding:** inspect the reported location locally, remove the value, and use Jenkins credentials where appropriate. Revoke or rotate any real exposed credential. Keep secret values out of screenshots and chat.
 - **Database download, container, or timeout error:** fix connectivity or Docker access and rerun. Preserve the error as an execution failure; do not substitute an empty report.
 
-The actual Security stage has not yet run in Windows Jenkins. Its real findings and pass/fail result must be collected before the report claims successful security validation.
+### First Security result and remediation
+
+Build #4 completed both scans and failed the security gate as intended:
+
+| Scan target | HIGH | CRITICAL | Result |
+| --- | --- | --- | --- |
+| Debian 12.15 OS packages | 52 | 4 | Blocking findings |
+| Node.js packages in the image | 4 | 0 | Blocking findings |
+| Checked-out source secrets | — | — | No secret patterns detected |
+
+These are 60 package-level advisory matches, not 60 distinct CVEs; several advisories recur across related packages. A scanner match also requires review of the advisory and application exposure. The OS findings included util-linux-related packages and Perl, with many entries lacking an available fixed version. The Node.js findings named `brace-expansion`, `ip-address` and `tar`; none is declared by this application. Use each result's full package path in `trivy-image.json` to establish its origin.
+
+The replacement image uses a refreshed Alpine base and copies only the Node executable from the compatible official Node image. It omits the Debian utilities and npm/Yarn package trees that the application does not need. The HIGH/CRITICAL and source-secret blocking rules remain unchanged. This reduces the packaged components; only a new scan can establish the new image's findings and gate outcome.
+
+Keep build #4's console output and archived reports as the original evidence. After merging the image changes, select **Build Now**, collect the new reports, and check the application and SQLite persistence with the new image. Do not claim remediation passed until that run verifies it.
 
 ## Remaining stages to implement
 
@@ -227,13 +245,18 @@ The 37 automated backend tests passed on Node.js 24.19.0 in the preparation envi
 
 The user's Windows Jenkins build #3 resolved the earlier automatic-analysis conflict, imported `/usr/src/reports/lcov.info`, uploaded the analysis, passed the SonarQube Cloud quality gate and finished successfully. This verifies Build, Test, and Code Quality for that source revision.
 
-The Security commands were checked against Trivy's official release and CLI documentation. Docker, Jenkins, and Trivy execution are unavailable in the preparation environment. The container mounts, scans, secret-report template, and gate outcome still need the real Windows Jenkins run. Generate and use those real reports for assessment evidence.
+The user's Windows Jenkins build #4 verified the Security container mounts, image scan, source-secret report template, report archiving and blocking gate. It failed on 56 HIGH and 4 CRITICAL package-level image findings, while the source scan reported no secret patterns. Build, Test and Code Quality passed in that same run.
+
+Docker, Jenkins and Trivy execution are unavailable in the preparation environment. The new Alpine image, non-root report generation and its scan outcome still require a Windows Jenkins run; a local test pass does not establish container compatibility or a passing security gate. Generate and use those real reports for assessment evidence.
 
 ## Technical references
 
 - [Node.js test runner](https://nodejs.org/docs/latest-v24.x/api/test.html)
 - [Node.js SQLite module](https://nodejs.org/api/sqlite.html)
 - [Docker multi-stage builds](https://docs.docker.com/build/building/multi-stage/)
+- [Official Node image guidance for a smaller runtime without npm/Yarn](https://github.com/nodejs/docker-node/blob/main/docs/BestPractices.md#smaller-images-without-npmyarn)
+- [Official Node 24 Alpine 3.24 image definition](https://github.com/nodejs/docker-node/blob/main/24/alpine3.24/Dockerfile)
+- [Docker build options for pulling base images and disabling cache](https://docs.docker.com/reference/cli/docker/buildx/build/)
 - [Jenkins Windows batch steps](https://www.jenkins.io/doc/pipeline/steps/workflow-durable-task-step/#bat-windows-batch-script)
 - [SonarScanner CLI](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/scanners/sonarscanner-cli)
 - [SonarQube Cloud analysis parameters and quality-gate polling](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/analysis-parameters/parameters-not-settable-in-ui)
