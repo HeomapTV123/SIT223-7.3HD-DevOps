@@ -2,7 +2,7 @@
 
 Taskboard is a small application for the SIT223 7.3HD Jenkins DevOps task. It provides real features that can be built, tested, deployed and monitored: task creation, editing, completion, deletion, searching, filtering and database persistence.
 
-The Jenkinsfile now includes **Build, Test, and Code Quality**. Build and Test passed in Windows Jenkins build #1 with 37 passing tests. Code Quality is configured for SonarQube Cloud and needs its first authenticated Jenkins run. The full assessment still needs Security, Deploy, Release, and Monitoring with automatic notifications, followed by the demonstration video and report.
+The Jenkinsfile now includes **Build, Test, Code Quality, and Security**. Windows Jenkins build #3 passed the first three stages, including all 37 tests, coverage import, and the SonarQube Cloud quality gate. Security is prepared with Trivy and needs its first Windows Jenkins run. The full assessment still needs Deploy, Release, and Monitoring with automatic notifications, followed by the demonstration video and report.
 
 ## Start here on Windows
 
@@ -76,8 +76,9 @@ The application uses Node.js 24 and its built-in HTTP server, SQLite module and 
 | `scripts/healthcheck.js` | Checks that the running application and database are ready. |
 | `Dockerfile` | Defines separate test and runtime images from a common base. |
 | `compose.yaml` | Runs the local development application with persistent storage. |
-| `Jenkinsfile` | Build, Test, and Code Quality automation for Windows Jenkins. |
+| `Jenkinsfile` | Build, Test, Code Quality, and Security automation for Windows Jenkins. |
 | `sonar-project.properties` | SonarQube Cloud project identifiers, source scope, coverage import, and quality-gate settings. |
+| `ci/secrets-report.tpl` | Produces a secret-scan report containing locations and rule details without secret values or source snippets. |
 
 ## How to run tests with reports
 
@@ -116,15 +117,16 @@ This uses `data/tasks.db` in the project folder. It is a different database from
 
 Use the included Jenkinsfile after this folder has been committed to your own GitHub repository. Configure the new job as **Pipeline script from SCM**, with Git as SCM and `Jenkinsfile` as the script path. Jenkins checks out the repository automatically. The JUnit plugin must be installed to publish the test results.
 
-This Jenkinsfile defines three assessed stages:
+This Jenkinsfile defines four assessed stages:
 
 1. **Build** creates a runtime image tagged with the Jenkins build number, stores it in the local Docker image store and archives its metadata.
 2. **Test** builds the test image, runs the tests in a container, copies the reports into the Jenkins workspace and publishes them. Tests or coverage failures fail the stage. The temporary test container is removed afterward.
 3. **Code Quality** runs SonarScanner in Docker, imports the LCOV report, submits analysis to SonarQube Cloud and waits for the quality gate. A rejected gate, processing timeout, authentication failure or scanner error fails the stage. The scanner container is removed afterward, and any generated analysis-task metadata and scanner-image metadata are archived.
+4. **Security** runs Trivy against an exported copy of the runtime image and scans the checked-out source for secret patterns. It records all vulnerability severities and fails on any HIGH/CRITICAL image vulnerability or any detected source secret. Reports are archived even on failure. Scanner errors and missing reports also fail the stage.
 
 Each runtime image has `APP_VERSION` set to its build identifier. The app displays that value and exposes it through `/health` and `/api/info` so a later deployment can be matched to the build that produced it.
 
-This pipeline uses `bat` because the Jenkins executor is Windows, even though the containers themselves run Linux. Build #1 checked out commit `bb72e9836f6a42b0d199aabac9d83d01edb8ec67`, built the application image and passed all 37 tests. Run the updated pipeline to verify Code Quality against the real SonarQube Cloud project.
+This pipeline uses `bat` because the Jenkins executor is Windows, even though the containers themselves run Linux. Build #3 checked out commit `23e177ec533ffdd39df9a8e499a07c91ed07182e`, built `sit223-hd-task-manager:build-3`, passed all 37 tests, and reported `QUALITY GATE STATUS: PASSED` and `Finished: SUCCESS`. Run the updated pipeline to verify Security. The overall timeout is 30 minutes to allow the first scanner and vulnerability-database downloads.
 
 ## Configure SonarQube Cloud
 
@@ -152,11 +154,61 @@ If the stage fails:
 - **Quality gate failed:** open the dashboard, inspect the failing conditions, fix the code or add meaningful tests, commit and rerun.
 - **Connection or timeout error:** check Docker Desktop and network connectivity, then retry and preserve the actual outcome.
 
+## Run the Security stage
+
+Security uses the official `aquasec/trivy:0.74.0` Docker image. No additional Jenkins credential, Trivy account, or Windows scanner installation is needed. Docker Desktop must be running, and Jenkins needs outbound access to Docker Hub and Trivy's vulnerability-database registries. The first scan downloads a database; a named volume, `sit223-hd-trivy-cache`, retains the cache for later runs. Trivy checks database freshness when scanning; the pipeline does not skip database updates.
+
+After the Security changes are merged into `main`, select **Build Now** in the existing Jenkins job. Open **Console Output** and inspect the fourth stage. The source is mounted read-only in Trivy, and its reports are written to a separate writable mount. The SonarQube token is scoped to the earlier Code Quality stage and is not passed to Trivy.
+
+The image scan uses `docker image save` to export the same runtime image created by Build, then scans that archive using `trivy image --input`. This works with the Linux engine behind Windows Docker Desktop without sharing its Docker socket with the scanner. The temporary archive is removed in cleanup and is not archived as a Jenkins report.
+
+### Scope and policy
+
+| Check | Scope | Blocking rule |
+| --- | --- | --- |
+| Image vulnerabilities | OS packages and supported language packages detected in the runtime image, including the base image | Any HIGH or CRITICAL vulnerability, even if no fixed version is available |
+| Source secrets | Current checked-out files inspected with Trivy's built-in secret rules | Any reported secret, at any severity |
+| Scanner health | Scan commands, report creation, and report conversion | Command failure, timeout, malformed input, or missing required report |
+
+The full image JSON and text reports include UNKNOWN, LOW, MEDIUM, HIGH, and CRITICAL results. The gate reads that same JSON, rather than performing a second vulnerability scan with a potentially different database. The collection command's `--exit-code 0` allows the complete report to be generated; the subsequent mandatory gate uses `--severity HIGH,CRITICAL --exit-code 10` and fails Jenkins when those findings exist. There is no `--ignore-unfixed` filter or CVE suppression file in this change.
+
+The source scan skips generated reports, coverage, database data, installed modules, `.scannerwork`, and Git metadata. Trivy's built-in allowed paths and binary/lock-file skip patterns also apply. This checks the current working tree, not deleted secrets in Git history. `ci/secrets-report.tpl` reports only file path, rule ID, severity, and line number; it does not print matched secret values or surrounding source lines. A clean scan means no configured patterns were detected in that scope.
+
+This application has no third-party npm dependencies, so `npm audit` alone would have very little scope. Scanning the built image also assesses the packaged operating system and supported packages shipped with the runtime. These checks complement the functional tests and SonarQube analysis.
+
+### Reports and evidence
+
+Open the Jenkins build's **Artifacts** and find `reports/security/`:
+
+| Report | Purpose |
+| --- | --- |
+| `scan-context.txt` | Build number, source commit, application image tag, scanner tag, and policy |
+| `scanner-image.json` | Docker metadata identifying the scanner image that actually ran |
+| `trivy-image.json` | Full machine-readable vulnerability results |
+| `trivy-image.txt` | Readable report across all severities |
+| `trivy-image-gate.txt` | HIGH/CRITICAL results used to block the pipeline |
+| `trivy-secrets.txt` | Secret finding locations, with values and snippets omitted |
+| `trivy-version.txt` | Scanner version and cached database metadata |
+| `scan-exit-codes.txt` | Whether the two scan commands completed |
+| `gate-result.txt` | Final policy outcome after scans and report evaluation completed |
+
+An interrupted or failed scan may produce only some reports; missing `gate-result.txt` does not mean the gate passed. Exit code 10 is reserved by these commands for detected findings; other nonzero codes are treated as scan/evaluation errors. Existing reports are cleared before the run, and the stage archives any new reports even if it fails.
+
+For the assessment, capture the Security stage, its final outcome, and representative findings with package names, CVE IDs, severity, installed version and fixed version. Discuss lower-severity findings too. If a scan reports zero findings, preserve that real result rather than inventing vulnerabilities.
+
+### If Security fails
+
+- **HIGH/CRITICAL image findings:** inspect the package and fixed-version columns. Update the affected base image or package, rebuild, and retain both scan results to demonstrate remediation. For a base-image update, run `docker pull node:24-bookworm-slim` on the Jenkins computer before rerunning, or update the Dockerfile to a reviewed image/version. The replacement artifact must pass Build, Test, and Code Quality again.
+- **An unfixed HIGH/CRITICAL finding:** this policy still blocks it. Check the vendor advisory and choose a reviewed remediation or alternative base image. Any later policy exception needs a specific rationale and must be reported; do not silently suppress the finding to obtain a green build.
+- **Secret finding:** inspect the reported location locally, remove the value, and use Jenkins credentials where appropriate. Revoke or rotate any real exposed credential. Keep secret values out of screenshots and chat.
+- **Database download, container, or timeout error:** fix connectivity or Docker access and rerun. Preserve the error as an execution failure; do not substitute an empty report.
+
+The actual Security stage has not yet run in Windows Jenkins. Its real findings and pass/fail result must be collected before the report claims successful security validation.
+
 ## Remaining stages to implement
 
 | Assessed stage | Next implementation |
 | --- | --- |
-| Security | Scan the application/image with a security tool such as Trivy; document findings, severity and remediation. This project has no third-party npm dependencies, so an npm audit alone would have very little scope. |
 | Deploy | Automatically run the built image in a separate staging environment, then check health and application behaviour. |
 | Release | Promote the same tested image to a separate production demonstration environment, with its own configuration and database volume. Verify the release and provide rollback handling. |
 | Monitoring and Alerting | Collect the application's metrics with Prometheus, configure alert rules and a working notification receiver, then demonstrate a failure and recovery. |
@@ -173,7 +225,9 @@ The final report uses the supplied Word template and is submitted as PDF. Includ
 
 The 37 automated backend tests passed on Node.js 24.19.0 in the preparation environment. Generated XML was checked to contain three test suites and 37 test cases without failures. The user's Windows Jenkins build #1 also passed Build and Test, archived the reports, and recorded backend coverage of 100% lines, 99.37% branches and 100% functions. A user-provided browser screenshot demonstrated task creation in the running application.
 
-The Code Quality integration has been checked against the official scanner documentation and the generated relative LCOV paths. Docker and Jenkins are unavailable in the preparation environment, and no SonarQube token is available there. Its authenticated scanner run and quality-gate outcome must therefore be verified in Windows Jenkins. Generate and use the resulting real reports for assessment evidence.
+The user's Windows Jenkins build #3 resolved the earlier automatic-analysis conflict, imported `/usr/src/reports/lcov.info`, uploaded the analysis, passed the SonarQube Cloud quality gate and finished successfully. This verifies Build, Test, and Code Quality for that source revision.
+
+The Security commands were checked against Trivy's official release and CLI documentation. Docker, Jenkins, and Trivy execution are unavailable in the preparation environment. The container mounts, scans, secret-report template, and gate outcome still need the real Windows Jenkins run. Generate and use those real reports for assessment evidence.
 
 ## Technical references
 
@@ -184,3 +238,7 @@ The Code Quality integration has been checked against the official scanner docum
 - [SonarScanner CLI](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/scanners/sonarscanner-cli)
 - [SonarQube Cloud analysis parameters and quality-gate polling](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/analysis-parameters/parameters-not-settable-in-ui)
 - [JavaScript LCOV coverage parameters](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/test-coverage/test-coverage-parameters)
+- [Trivy v0.74.0 release](https://github.com/aquasecurity/trivy/releases/tag/v0.74.0)
+- [Trivy container image scanning, including exported archives](https://trivy.dev/docs/latest/guide/target/container_image/)
+- [Trivy report conversion and severity gate options](https://trivy.dev/docs/latest/guide/references/configuration/cli/trivy_convert/)
+- [Trivy secret scanning and built-in exclusions](https://trivy.dev/docs/latest/guide/scanner/secret/)
