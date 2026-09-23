@@ -20,14 +20,17 @@ pipeline {
                     env.SONAR_CONTAINER = "sit223-hd-sonar-${env.BUILD_TAG}".replaceAll('[^a-zA-Z0-9_.-]', '-')
                     env.SECURITY_CONTAINER = "sit223-hd-security-${env.BUILD_TAG}".replaceAll('[^a-zA-Z0-9_.-]', '-')
                 }
-                bat 'docker build --target runtime --build-arg APP_VERSION=%APP_VERSION% -t %APP_IMAGE% .'
+                // Refresh both base images and Alpine packages for the security scan.
+                bat 'docker build --pull --no-cache --target runtime --build-arg APP_VERSION=%APP_VERSION% -t %APP_IMAGE% .'
                 bat 'docker image inspect %APP_IMAGE% > image-metadata.json'
-                archiveArtifacts artifacts: 'image-metadata.json', fingerprint: true
+                bat 'docker run --rm %APP_IMAGE% node --version > runtime-node-version.txt'
+                archiveArtifacts artifacts: 'image-metadata.json,runtime-node-version.txt', fingerprint: true
             }
         }
         stage('Test') {
             steps {
-                bat 'docker build --target test -t %TEST_IMAGE% .'
+                // Reuse this build's refreshed application layers and version in the test target.
+                bat 'docker build --target test --build-arg APP_VERSION=%APP_VERSION% -t %TEST_IMAGE% .'
                 script {
                     dir('reports') { deleteDir() }
                     try {
@@ -114,10 +117,10 @@ docker run --rm --name "%SECURITY_CONTAINER%" --volume "%WORKSPACE%:/project:ro"
                             error('A security report is missing. The stage cannot pass without both reports.')
                         }
                         bat '''@echo off
-docker run --rm --name "%SECURITY_CONTAINER%" --volume "%WORKSPACE%/reports/security:/reports" "%TRIVY_IMAGE%" convert --format table --output /reports/trivy-image.txt /reports/trivy-image.json
+docker run --rm --name "%SECURITY_CONTAINER%" --volume "%WORKSPACE%/reports/security:/reports" "%TRIVY_IMAGE%" convert --scanners vuln --format table --output /reports/trivy-image.txt /reports/trivy-image.json
 '''
                         int imageGate = bat(returnStatus: true, script: '''@echo off
-docker run --rm --name "%SECURITY_CONTAINER%" --volume "%WORKSPACE%/reports/security:/reports" "%TRIVY_IMAGE%" convert --format table --severity HIGH,CRITICAL --exit-code 10 --output /reports/trivy-image-gate.txt /reports/trivy-image.json
+docker run --rm --name "%SECURITY_CONTAINER%" --volume "%WORKSPACE%/reports/security:/reports" "%TRIVY_IMAGE%" convert --scanners vuln --format table --severity HIGH,CRITICAL --exit-code 10 --output /reports/trivy-image-gate.txt /reports/trivy-image.json
 ''')
                         if (!(imageGate in [0, 10])) {
                             error('The image security gate could not evaluate its report. Inspect the output above.')

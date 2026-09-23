@@ -4,6 +4,8 @@ data
 reports
 coverage
 .scannerwork
+image-metadata.json
+runtime-node-version.txt
 .env
 .env.*
 *.log
