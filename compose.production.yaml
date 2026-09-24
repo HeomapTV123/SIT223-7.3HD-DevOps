@@ -1,0 +1,27 @@
+name: sit223-hd-production
+services:
+  app:
+    image: ${PRODUCTION_IMAGE:?Set PRODUCTION_IMAGE to the image ID verified in staging}
+    pull_policy: never
+    container_name: sit223-hd-production
+    ports:
+      - "127.0.0.1:3002:3000"
+    environment:
+      APP_ENV: production
+    volumes:
+      - production-data:/app/data
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  production-data:

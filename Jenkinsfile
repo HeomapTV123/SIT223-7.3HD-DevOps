@@ -1,4 +1,4 @@
-// Milestone 4: add an automated staging deployment after all quality/security gates.
+// Milestone 5: promote the checked staging image to a separate production environment.
 pipeline {
     agent any
     environment {
@@ -7,6 +7,9 @@ pipeline {
         STAGING_PROJECT = 'sit223-hd-staging'
         STAGING_CONTAINER = 'sit223-hd-staging'
         STAGING_URL = 'http://127.0.0.1:3001'
+        PRODUCTION_PROJECT = 'sit223-hd-production'
+        PRODUCTION_CONTAINER = 'sit223-hd-production'
+        PRODUCTION_URL = 'http://127.0.0.1:3002'
     }
     options {
         disableConcurrentBuilds()
@@ -15,11 +18,16 @@ pipeline {
     parameters {
         booleanParam(name: 'VERIFY_STAGING_ROLLBACK', defaultValue: false,
             description: 'Demonstration only: fail Deploy after its checks and restore the previous staging image. Requires a prior successful deployment; this build will fail.')
+        booleanParam(name: 'VERIFY_PRODUCTION_ROLLBACK', defaultValue: false,
+            description: 'Demonstration only: fail Release after its checks and restore the previous production image. Requires a prior successful release; this build will fail. Leave staging rollback unchecked.')
     }
     stages {
         stage('Build') {
             steps {
                 script {
+                    if (params.VERIFY_STAGING_ROLLBACK && params.VERIFY_PRODUCTION_ROLLBACK) {
+                        error('Select only one rollback demonstration per build.')
+                    }
                     env.APP_VERSION = "build-${env.BUILD_NUMBER}"
                     env.APP_IMAGE = "sit223-hd-task-manager:${env.APP_VERSION}"
                     env.TEST_IMAGE = "sit223-hd-task-manager-tests:${env.APP_VERSION}"
@@ -27,6 +35,7 @@ pipeline {
                     env.SONAR_CONTAINER = "sit223-hd-sonar-${env.BUILD_TAG}".replaceAll('[^a-zA-Z0-9_.-]', '-')
                     env.SECURITY_CONTAINER = "sit223-hd-security-${env.BUILD_TAG}".replaceAll('[^a-zA-Z0-9_.-]', '-')
                     env.SMOKE_CONTAINER = "sit223-hd-smoke-${env.BUILD_TAG}".replaceAll('[^a-zA-Z0-9_.-]', '-')
+                    env.RELEASE_SMOKE_CONTAINER = "sit223-hd-release-smoke-${env.BUILD_TAG}".replaceAll('[^a-zA-Z0-9_.-]', '-')
                 }
                 // Refresh both base images and Alpine packages for the security scan.
                 bat 'docker build --pull --no-cache --target runtime --build-arg APP_VERSION=%APP_VERSION% -t %APP_IMAGE% .'
@@ -286,6 +295,184 @@ Docker health, HTTP smoke checks and the Windows-host health request passed.
             post {
                 always {
                     archiveArtifacts artifacts: 'reports/deploy/*', allowEmptyArchive: true, fingerprint: true
+                }
+            }
+        }
+        stage('Release') {
+            options { timeout(time: 5, unit: 'MINUTES') }
+            steps {
+                script {
+                    dir('reports/release') {
+                        deleteDir()
+                        writeFile file: 'release-result.txt', text: 'Release: NOT_COMPLETED\n'
+                    }
+                    String previousImage = ''
+                    boolean replacementStarted = false
+                    boolean releaseTagCreated = false
+                    withEnv(["PRODUCTION_IMAGE=${env.APP_IMAGE_ID}"]) {
+                        try {
+                            if (!(env.APP_IMAGE_ID ==~ /sha256:[a-f0-9]{64}/) ||
+                                !(env.GIT_COMMIT ==~ /[a-f0-9]{40}/)) {
+                                error('Build image or source commit is missing. Run the complete pipeline before releasing.')
+                            }
+                            String mainCommit = bat(returnStdout: true, script: '@git rev-parse refs/remotes/origin/main').trim()
+                            if (env.GIT_COMMIT != mainCommit) {
+                                error('Release requires the main commit fetched by this Jenkins checkout.')
+                            }
+                            if (!fileExists('reports/deploy/deployment-result.txt') ||
+                                !readFile('reports/deploy/deployment-result.txt').startsWith('Deployment: PASSED\n')) {
+                                error('Release requires a successful staging deployment in this build.')
+                            }
+                            env.RELEASE_IMAGE = "sit223-hd-task-manager:release-${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(12)}"
+                            writeFile file: 'reports/release/release-context.txt', text: """Build: ${env.BUILD_NUMBER}
+Build URL: ${env.BUILD_URL}
+Commit: ${env.GIT_COMMIT}
+Version: ${env.APP_VERSION}
+Image ID: ${env.APP_IMAGE_ID}
+Candidate release tag: ${env.RELEASE_IMAGE}
+Source environment: staging (${env.STAGING_URL})
+Target environment: production (${env.PRODUCTION_URL})
+Compose project: ${env.PRODUCTION_PROJECT}
+Rollback demonstration requested: ${params.VERIFY_PRODUCTION_ROLLBACK ?: false}
+"""
+                            // Recheck the promotion source before touching the production environment.
+                            String stagingOwned = bat(returnStdout: true, script: '@docker ps --filter "name=^/%STAGING_CONTAINER%$" --filter "label=com.docker.compose.project=%STAGING_PROJECT%" --filter "label=com.docker.compose.service=app" --format "{{.ID}}"').trim()
+                            if (!stagingOwned) {
+                                error('The expected staging service is not running.')
+                            }
+                            String stagingImage = bat(returnStdout: true, script: '@docker inspect --format "{{.Image}}" %STAGING_CONTAINER%').trim()
+                            String stagingHealth = bat(returnStdout: true, script: '@docker inspect --format "{{.State.Health.Status}}" %STAGING_CONTAINER%').trim()
+                            if (stagingImage != env.APP_IMAGE_ID || stagingHealth != 'healthy') {
+                                error('Staging must still be healthy and running this build\'s checked image before promotion.')
+                            }
+                            bat 'docker inspect %STAGING_CONTAINER% > reports/release/promoted-from-staging.json'
+                            bat 'docker compose version > reports/release/compose-version.txt'
+                            bat 'docker compose --project-name %PRODUCTION_PROJECT% --file compose.production.yaml config > reports/release/compose-resolved.yaml'
+                            // Never overwrite an existing versioned release tag, even on a repeated stage.
+                            String existingTag = bat(returnStdout: true, script: '@docker image ls --quiet --no-trunc --filter "reference=%RELEASE_IMAGE%"').trim()
+                            if (existingTag) {
+                                error('This release tag already exists. Use a new Jenkins build to create a new release.')
+                            }
+                            String existing = bat(returnStdout: true, script: '@docker ps -a --filter "name=^/%PRODUCTION_CONTAINER%$" --format "{{.ID}}"').trim()
+                            if (existing) {
+                                String owned = bat(returnStdout: true, script: '@docker ps -a --filter "name=^/%PRODUCTION_CONTAINER%$" --filter "label=com.docker.compose.project=%PRODUCTION_PROJECT%" --filter "label=com.docker.compose.service=app" --format "{{.ID}}"').trim()
+                                if (owned != existing) {
+                                    error('The production container name is already used by a different project. No container was replaced.')
+                                }
+                                previousImage = bat(returnStdout: true, script: '@docker inspect --format "{{.Image}}" %PRODUCTION_CONTAINER%').trim()
+                                if (!(previousImage ==~ /sha256:[a-f0-9]{64}/)) {
+                                    error('Could not identify the previous production image for rollback.')
+                                }
+                                bat 'docker inspect %PRODUCTION_CONTAINER% > reports/release/previous-container.json'
+                            }
+                            writeFile file: 'reports/release/previous-image.txt', text: "${previousImage ?: 'NONE: first release'}\n"
+                            if (params.VERIFY_PRODUCTION_ROLLBACK) {
+                                if (!previousImage) {
+                                    error('Complete a normal production release before requesting a production rollback demonstration.')
+                                }
+                                String previousHealth = bat(returnStdout: true, script: '@docker inspect --format "{{.State.Health.Status}}" %PRODUCTION_CONTAINER%').trim()
+                                if (previousHealth != 'healthy') {
+                                    error('The previous production service must be healthy before demonstrating rollback.')
+                                }
+                            }
+
+                            replacementStarted = true
+                            // Promote the same immutable image ID; do not rebuild or download an image.
+                            bat 'docker compose --project-name %PRODUCTION_PROJECT% --file compose.production.yaml up -d --no-build --pull never --wait --wait-timeout 90 app'
+                            String releasedImage = bat(returnStdout: true, script: '@docker inspect --format "{{.Image}}" %PRODUCTION_CONTAINER%').trim()
+                            if (releasedImage != env.APP_IMAGE_ID) {
+                                error('Production is not running the image that passed staging and Security.')
+                            }
+                            bat '''@echo off
+docker run --rm --name "%RELEASE_SMOKE_CONTAINER%" --network "%PRODUCTION_PROJECT%_default" --read-only --cap-drop ALL --security-opt no-new-privileges:true --no-healthcheck --volume "%WORKSPACE%/scripts:/checks:ro" "%APP_IMAGE_ID%" node /checks/smoke-deploy.mjs http://app:3000 "%APP_VERSION%" production > reports/release/smoke-test.json
+'''
+                            powershell '''
+$ErrorActionPreference = 'Stop'
+$health = Invoke-RestMethod -Uri ($env:PRODUCTION_URL + '/health') -TimeoutSec 10
+if ($health.status -ne 'ok' -or $health.environment -ne 'production' -or $health.version -ne $env:APP_VERSION) {
+    throw 'Published production endpoint did not return the expected health, environment and build version.'
+}
+$health | ConvertTo-Json | Set-Content -Path 'reports/release/host-health.json' -Encoding UTF8
+'''
+                            if (params.VERIFY_PRODUCTION_ROLLBACK) {
+                                error('Intentional Release failure requested to demonstrate production rollback after all checks passed.')
+                            }
+                            // A versioned release tag is created only after every production check passes.
+                            bat 'docker image tag %APP_IMAGE_ID% %RELEASE_IMAGE%'
+                            releaseTagCreated = true
+                            String taggedImage = bat(returnStdout: true, script: '@docker image inspect --format "{{.Id}}" %RELEASE_IMAGE%').trim()
+                            if (taggedImage != releasedImage) {
+                                error('The release tag does not identify the verified production image.')
+                            }
+                            bat 'docker image inspect %RELEASE_IMAGE% > reports/release/release-image.json'
+                            writeFile file: 'reports/release/release-manifest.txt', text: """Release tag: ${env.RELEASE_IMAGE}
+Application version: ${env.APP_VERSION}
+Source commit: ${env.GIT_COMMIT}
+Jenkins build: ${env.BUILD_NUMBER}
+Jenkins URL: ${env.BUILD_URL}
+Image ID built, scanned, staged and released: ${releasedImage}
+Previous production image ID: ${previousImage ?: 'NONE: first release'}
+Source environment: staging
+Target environment: production
+Production URL: ${env.PRODUCTION_URL}
+Production data volume: ${env.PRODUCTION_PROJECT}_production-data
+Configuration: compose.production.yaml (archived as compose-resolved.yaml)
+Verification: Docker health, image identity, HTTP smoke checks and Windows-host health all passed.
+"""
+                            writeFile file: 'reports/release/release-result.txt', text: "Release: PASSED\nVersion: ${env.APP_VERSION}\nTag: ${env.RELEASE_IMAGE}\nImage ID: ${releasedImage}\nURL: ${env.PRODUCTION_URL}\n"
+                            echo "Production is ready at ${env.PRODUCTION_URL} (${env.APP_VERSION}). Release tag: ${env.RELEASE_IMAGE}"
+                        } catch (failure) {
+                            String recovery = 'NOT_NEEDED: production replacement did not start'
+                            if (replacementStarted) {
+                                bat(returnStatus: true, script: '@docker inspect %PRODUCTION_CONTAINER% > reports/release/failed-container.json 2> reports/release/failed-inspect-error.txt')
+                                bat(returnStatus: true, script: '@docker logs --tail 100 %PRODUCTION_CONTAINER% > reports/release/failed-container.log 2>&1')
+                                try {
+                                    if (previousImage) {
+                                        withEnv(["PRODUCTION_IMAGE=${previousImage}"]) {
+                                            bat 'docker compose --project-name %PRODUCTION_PROJECT% --file compose.production.yaml up -d --no-build --pull never --wait --wait-timeout 90 app'
+                                        }
+                                        String restoredImage = bat(returnStdout: true, script: '@docker inspect --format "{{.Image}}" %PRODUCTION_CONTAINER%').trim()
+                                        if (restoredImage != previousImage) {
+                                            error('Production rollback did not restore the previous image.')
+                                        }
+                                        recovery = "PASSED: previous production image restored and healthy (${previousImage})"
+                                    } else {
+                                        bat 'docker compose --project-name %PRODUCTION_PROJECT% --file compose.production.yaml stop --timeout 10 app'
+                                        recovery = 'NO_PREVIOUS_IMAGE: first release stopped; production data retained'
+                                    }
+                                } catch (rollbackFailure) {
+                                    recovery = "FAILED: ${rollbackFailure.message}"
+                                    echo 'Production recovery failed. Inspect the release artifacts and Docker Desktop before retrying.'
+                                }
+                            }
+                            String tagCleanup = 'NOT_NEEDED: no release tag created'
+                            if (releaseTagCreated) {
+                                int cleanupStatus = bat(returnStatus: true, script: '@docker image rm %RELEASE_IMAGE%')
+                                tagCleanup = cleanupStatus == 0 ? 'PASSED: failed release tag removed' : 'FAILED: inspect the release tag manually'
+                                // A failed attempt must not retain a manifest claiming successful verification.
+                                dir('reports/release') {
+                                    if (fileExists('release-manifest.txt')) {
+                                        writeFile file: 'release-manifest.txt', text: 'Release invalidated. See release-result.txt.\n'
+                                    }
+                                }
+                            }
+                            writeFile file: 'reports/release/rollback-result.txt', text: "${recovery}\n"
+                            writeFile file: 'reports/release/release-result.txt', text: "Release: FAILED\nReason: ${failure.message}\nRecovery: ${recovery}\nTag cleanup: ${tagCleanup}\n"
+                            echo "Production recovery: ${recovery}"
+                            throw failure
+                        } finally {
+                            bat(returnStatus: true, script: '@docker rm -f "%RELEASE_SMOKE_CONTAINER%" >nul 2>&1')
+                            if (replacementStarted) {
+                                bat(returnStatus: true, script: '@docker inspect %PRODUCTION_CONTAINER% > reports/release/final-container.json 2> reports/release/final-inspect-error.txt')
+                                bat(returnStatus: true, script: '@docker logs --tail 100 %PRODUCTION_CONTAINER% > reports/release/final-container.log 2>&1')
+                            }
+                        }
+                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/release/*', allowEmptyArchive: true, fingerprint: true
                 }
             }
         }
