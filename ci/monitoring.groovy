@@ -79,7 +79,7 @@ if ($health.status -ne 'ok' -or $health.environment -ne 'production' -or $health
             writeFile file: 'reports/monitoring/email-result.txt', text: 'Email delivery: IN_PROGRESS\nReal production outage demonstration requested.\n'
             bat 'docker stop --time 10 %PRODUCTION_CONTAINER%'
             bat '''@echo off
-docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network sit223-hd-monitoring_default --read-only --cap-drop ALL --security-opt no-new-privileges:true --volume "%WORKSPACE%/scripts:/checks:ro" --volume "%WORKSPACE%/reports/monitoring:/reports:ro" "%APP_IMAGE_ID%" node /checks/check-monitoring.mjs firing /reports/monitoring-ready.json > reports/monitoring/alert-firing.json
+docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network sit223-hd-monitoring_default --read-only --cap-drop ALL --security-opt no-new-privileges:true --volume "%WORKSPACE%/scripts:/checks:ro" --volume "%WORKSPACE%/reports/monitoring:/reports:ro" "%APP_IMAGE_ID%" node /checks/check-monitoring.mjs firing > reports/monitoring/alert-firing.json
 '''
         } finally {
             // Recovery also runs after a failed SMTP attempt or failed monitoring check.
@@ -106,7 +106,7 @@ throw 'Production did not become healthy within 90 seconds. Inspect Docker Deskt
             }
         }
         bat '''@echo off
-docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network sit223-hd-monitoring_default --read-only --cap-drop ALL --security-opt no-new-privileges:true --volume "%WORKSPACE%/scripts:/checks:ro" --volume "%WORKSPACE%/reports/monitoring:/reports:ro" "%APP_IMAGE_ID%" node /checks/check-monitoring.mjs resolved /reports/alert-firing.json > reports/monitoring/alert-resolved.json
+docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network sit223-hd-monitoring_default --read-only --cap-drop ALL --security-opt no-new-privileges:true --volume "%WORKSPACE%/scripts:/checks:ro" --volume "%WORKSPACE%/reports/monitoring:/reports:ro" "%APP_IMAGE_ID%" node /checks/check-monitoring.mjs resolved > reports/monitoring/alert-resolved.json
 '''
         writeFile file: 'reports/monitoring/email-result.txt', text: 'Email delivery: SMTP_ACCEPTED\nA real TaskboardDown alert fired and resolved. Alertmanager recorded a successful email request in each phase.\nConfirm both FIRING and RESOLVED messages arrived in the receiver mailbox; SMTP acceptance alone does not prove inbox delivery.\n'
     }

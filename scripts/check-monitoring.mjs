@@ -8,18 +8,83 @@ const productionAlert = (alert) => alert.labels?.alertname === 'TaskboardDown'
   && alert.labels?.environment === 'production';
 const metricLabels = { integration: 'email', receiver_name: 'availability-email' };
 
+const isSpace = (character) => character === ' ' || character === '\t' || character === '\r';
+
+function skipSpaces(line, offset) {
+  while (isSpace(line[offset])) offset++;
+  return offset;
+}
+
+function readLabelValue(line, offset) {
+  if (line[offset] !== '"') throw new Error('Invalid metric label: expected a quoted value.');
+  const characters = [];
+  for (let index = offset + 1; index < line.length; index++) {
+    const character = line[index];
+    if (character === '"') return { value: characters.join(''), next: index + 1 };
+    if (character !== '\\') {
+      characters.push(character);
+      continue;
+    }
+    // Prometheus label values support exactly these three escape sequences.
+    const escaped = line[++index];
+    if (escaped === 'n') characters.push('\n');
+    else if (escaped === '\\' || escaped === '"') characters.push(escaped);
+    else throw new Error('Invalid metric label escape.');
+  }
+  throw new Error('Unterminated metric label value.');
+}
+
+function readMetricLabels(line, offset) {
+  const labels = new Map();
+  let index = offset + 1;
+  while (index < line.length) {
+    index = skipSpaces(line, index);
+    if (line[index] === '}') return { labels, next: index + 1 };
+    const equals = line.indexOf('=', index);
+    if (equals < 0) throw new Error('Invalid metric label assignment.');
+    const name = line.slice(index, equals).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || labels.has(name)) {
+      throw new Error('Invalid or duplicate metric label name.');
+    }
+    const parsed = readLabelValue(line, skipSpaces(line, equals + 1));
+    labels.set(name, parsed.value);
+    index = skipSpaces(line, parsed.next);
+    if (line[index] === '}') return { labels, next: index + 1 };
+    if (line[index] !== ',') throw new Error('Invalid metric label separator.');
+    index++;
+  }
+  throw new Error('Unterminated metric labels.');
+}
+
+function readMetricValue(line, offset, name) {
+  if (!isSpace(line[offset])) throw new Error(`Invalid ${name} metric separator.`);
+  const start = skipSpaces(line, offset);
+  let end = start;
+  while (end < line.length && !isSpace(line[end])) end++;
+  const token = line.slice(start, end);
+  const value = Number(token);
+  // Non-finite, negative and malformed values cannot establish delivery evidence.
+  if (!/^[\d.eE+-]+$/.test(token) || !Number.isFinite(value) || value < 0) {
+    throw new Error(`Invalid ${name} metric.`);
+  }
+  return value;
+}
+
 export function metricSum(text, name, wanted = {}) {
   let total = 0;
-  for (const line of text.split('\n')) {
-    const match = /^(\w+)(?:\{(.*)\})?\s+([\d.eE+-]+)(?:\s|$)/.exec(line);
-    if (!match || match[1] !== name) continue;
-    const labels = Object.fromEntries([...String(match[2] || '').matchAll(/(\w+)=("(?:[^"\\]|\\.)*")/g)]
-      .map((pair) => [pair[1], JSON.parse(pair[2])]));
-    if (!Object.entries(wanted).every(([key, value]) => labels[key] === value)) continue;
-    const value = Number(match[3]);
-    if (!Number.isFinite(value) || value < 0) throw new Error(`Invalid ${name} metric.`);
-    total += value;
+  const selectors = Object.entries(wanted);
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trimStart();
+    if (!line.startsWith(name)) continue;
+    const boundary = line[name.length];
+    if (boundary !== undefined && boundary !== '{' && !isSpace(boundary)) continue;
+    // Each cursor advances only forward; malformed labels never trigger repeated regex searches.
+    const { labels, next } = boundary === '{' ? readMetricLabels(line, name.length)
+      : { labels: new Map(), next: name.length };
+    if (!selectors.every(([key, value]) => labels.get(key) === value)) continue;
+    total += readMetricValue(line, next, name);
   }
+  if (!Number.isFinite(total)) throw new Error(`Invalid ${name} metric total.`);
   return total;
 }
 
@@ -120,10 +185,22 @@ export async function waitForMonitoring(phase, { baseline, timeoutMs = 180000, i
   throw error;
 }
 
+export function monitoringCommand(args, readReport = readFileSync) {
+  if (args.length !== 1 || !['ready', 'firing', 'resolved'].includes(args[0])) {
+    throw new Error('Usage: check-monitoring.mjs ready|firing|resolved (one phase argument only).');
+  }
+  const phase = args[0];
+  let baseline;
+  // These literal paths are supplied by Jenkins's read-only report mount, never by CLI input.
+  if (phase === 'firing') baseline = JSON.parse(readReport('/reports/monitoring-ready.json', 'utf8'));
+  if (phase === 'resolved') baseline = JSON.parse(readReport('/reports/alert-firing.json', 'utf8'));
+  return { phase, baseline };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    const baseline = process.argv[3] ? JSON.parse(readFileSync(process.argv[3], 'utf8')) : undefined;
-    const result = await waitForMonitoring(process.argv[2], { baseline,
+    const { phase, baseline } = monitoringCommand(process.argv.slice(2));
+    const result = await waitForMonitoring(phase, { baseline,
       prometheusUrl: process.env.PROMETHEUS_URL, alertmanagerUrl: process.env.ALERTMANAGER_URL,
       grafanaUrl: process.env.GRAFANA_URL });
     console.log(JSON.stringify(result, null, 2));
