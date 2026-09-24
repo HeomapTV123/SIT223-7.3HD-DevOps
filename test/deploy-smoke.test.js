@@ -4,14 +4,14 @@ import { spawn } from 'node:child_process';
 import { createApp } from '../src/app.js';
 import { smokeDeploy } from '../scripts/smoke-deploy.mjs';
 
-async function fixture(t) {
-  const app = createApp({ environment: 'staging', version: 'build-check', logger: () => {} });
+async function fixture(t, environment = 'staging') {
+  const app = createApp({ environment, version: 'build-check', logger: () => {} });
   await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
   t.after(async () => {
     app.server.closeAllConnections();
     await new Promise((resolve) => app.server.close(resolve));
   });
-  const options = { baseUrl: `http://127.0.0.1:${app.server.address().port}`, expectedVersion: 'build-check', expectedEnvironment: 'staging' };
+  const options = { baseUrl: `http://127.0.0.1:${app.server.address().port}`, expectedVersion: 'build-check', expectedEnvironment: environment };
   const existing = app.store.create({ title: 'Preserve this user task' });
   return { ...app, options, existing };
 }
@@ -67,4 +67,27 @@ test('smoke CLI writes JSON and returns a failing exit code for a wrong release'
   });
   assert.equal(code, 1);
   assert.equal(JSON.parse(stdout).status, 'FAILED');
+});
+
+test('production smoke CLI validates release identity and preserves existing user tasks', async (t) => {
+  const { options, store, existing } = await fixture(t, 'production');
+  const wrongEnvironment = await smokeDeploy({ ...options, expectedEnvironment: 'staging' });
+  assert.equal(wrongEnvironment.status, 'FAILED');
+  assert.deepEqual(store.list(), [existing]);
+
+  const child = spawn(process.execPath, ['scripts/smoke-deploy.mjs', options.baseUrl, options.expectedVersion, 'production']);
+  let stdout = '';
+  child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+  const code = await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', resolve);
+  });
+  const report = JSON.parse(stdout);
+  assert.equal(code, 0);
+  assert.equal(report.status, 'PASSED');
+  assert.equal(report.expectedEnvironment, 'production');
+  assert.equal(report.expectedVersion, options.expectedVersion);
+  assert.equal(report.checks.length, 7);
+  assert.ok(report.checks.every((check) => check.passed));
+  assert.deepEqual(store.list(), [existing]);
 });

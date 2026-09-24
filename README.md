@@ -2,7 +2,7 @@
 
 Taskboard is a small application for the SIT223 7.3HD Jenkins DevOps task. It provides real features that can be built, tested, deployed and monitored: task creation, editing, completion, deletion, searching, filtering and database persistence.
 
-The Jenkinsfile now includes **Build, Test, Code Quality, Security, and Deploy**. Windows Jenkins build #5 verified the first four stages after the smaller runtime image replaced the image blocked in build #4. The new Deploy stage starts a separate staging application, checks it and attempts image rollback on failure; its first Windows Jenkins run is still required. Release and Monitoring with automatic notifications remain to be implemented, followed by the demonstration video and report.
+The Jenkinsfile now includes **Build, Test, Code Quality, Security, Deploy, and Release**. Windows Jenkins build #6 verified the first five stages; build #7 demonstrated staging rollback and preserved the user's task. The new Release stage promotes the checked image to a separate production environment, validates it and creates a versioned release tag. Its first Windows Jenkins run is still required. Monitoring with automatic notifications remains to be implemented, followed by the demonstration video and report.
 
 ## Start here on Windows
 
@@ -16,7 +16,7 @@ Requirements already checked on your computer: Node.js 24.11.0, Git, Docker Desk
 npm test
 ```
 
-The expected result is **42 tests, 42 passed, 0 failed**: the original 37 application tests and five tests of deployment-check behaviour. Node.js 24.11 may print an experimental warning for its built-in SQLite module; the test exit status and final summary determine the result. No third-party npm packages are required by this application.
+The expected result is **43 tests, 43 passed, 0 failed**: the original 37 application tests and six tests of deployment/release-check behaviour. Node.js 24.11 may print an experimental warning for its built-in SQLite module; the test exit status and final summary determine the result. No third-party npm packages are required by this application.
 
 4. Build and start the development container:
 
@@ -71,14 +71,15 @@ The application uses Node.js 24 and its built-in HTTP server, SQLite module and 
 | `src/validation.js` | Validation of task fields, dates, IDs and filters. |
 | `src/metrics.js` | Prometheus text-format metrics with fixed route labels. |
 | `public/` | Browser interface. |
-| `test/` | 42 automated validation, storage, HTTP integration and deployment-check tests. |
+| `test/` | 43 automated validation, storage, HTTP integration and deployment/release-check tests. |
 | `scripts/ci-report.js` | Runs tests with coverage thresholds and writes JUnit and LCOV reports. |
 | `scripts/healthcheck.js` | Checks that the running application and database are ready. |
 | `scripts/smoke-deploy.mjs` | Checks a deployed app's identity, browser assets, task operations and metrics; cleans up its temporary task. |
 | `Dockerfile` | Defines separate test and runtime images from a common base. |
 | `compose.yaml` | Runs the local development application with persistent storage. |
 | `compose.staging.yaml` | Defines the staging environment using an existing image, a separate database volume and localhost port 3001. |
-| `Jenkinsfile` | Build, Test, Code Quality, Security, and Deploy automation for Windows Jenkins. |
+| `compose.production.yaml` | Promotes an existing image into production, with its own database volume and localhost port 3002. |
+| `Jenkinsfile` | Build, Test, Code Quality, Security, Deploy, and Release automation for Windows Jenkins. |
 | `sonar-project.properties` | SonarQube Cloud project identifiers, source scope, coverage import, and quality-gate settings. |
 | `ci/secrets-report.tpl` | Produces a secret-scan report containing locations and rule details without secret values or source snippets. |
 
@@ -123,17 +124,18 @@ This uses `data/tasks.db` in the project folder. It is a different database from
 
 Use the included Jenkinsfile after this folder has been committed to your own GitHub repository. Configure the new job as **Pipeline script from SCM**, with Git as SCM and `Jenkinsfile` as the script path. Jenkins checks out the repository automatically. The JUnit plugin must be installed to publish the test results.
 
-This Jenkinsfile defines five assessed stages:
+This Jenkinsfile defines six assessed stages:
 
 1. **Build** refreshes the base images and packages, creates a runtime image tagged with the Jenkins build number, stores it in the local Docker image store, and archives its metadata and Node version.
 2. **Test** builds the test image with the same application layers and build version, runs the tests in a container, copies the reports into the Jenkins workspace and publishes them. Tests or coverage failures fail the stage. The temporary test container is removed afterward.
 3. **Code Quality** runs SonarScanner in Docker, imports the LCOV report, submits analysis to SonarQube Cloud and waits for the quality gate. A rejected gate, processing timeout, authentication failure or scanner error fails the stage. The scanner container is removed afterward, and any generated analysis-task metadata and scanner-image metadata are archived.
 4. **Security** runs Trivy against an exported copy of the runtime image and scans the checked-out source for secret patterns. It records all vulnerability severities and fails on any HIGH/CRITICAL image vulnerability or any detected source secret. Reports are archived even on failure. Scanner errors and missing reports also fail the stage.
 5. **Deploy** uses Docker Compose to run that same image in staging. It waits for Docker health, checks the deployed image ID, runs HTTP smoke checks and checks the published Windows-host port. A failed deployment triggers recovery and fails the build. Deployment evidence is archived on success or failure.
+6. **Release** requires the fetched `origin/main` commit and a successful staging result from this build. It rechecks staging's image and health, promotes that exact image ID to production, checks the service and creates a release tag containing the build number and abbreviated source commit. A failed release attempts production rollback and fails the build; release evidence is archived on success or failure.
 
 Each runtime image has `APP_VERSION` set to its build identifier. The app displays that value and exposes it through `/health` and `/api/info` so a later deployment can be matched to the build that produced it.
 
-This pipeline uses Windows `bat` steps and a PowerShell host-health request, while its containers run Linux. Build #4 failed Security on image findings. Build #5 checked out commit `625d53b1a7819ec85a79ac074b9c4c8fdc2e2449`, built `sit223-hd-task-manager:build-5`, passed all 37 tests then present, passed SonarQube and passed Security. The expanded 42-test suite and Deploy stage still need a new Windows Jenkins run. The pipeline timeout is 30 minutes; Deploy has its own five-minute limit.
+This pipeline uses Windows `bat` steps and PowerShell host-health requests, while its containers run Linux. Build #4 failed Security on image findings. Build #5 verified the smaller runtime and passed all four stages then implemented. Builds #6 and #7 passed the expanded 42-test suite, SonarQube and Security; #6 deployed staging successfully, and #7 deliberately failed Deploy and restored build #6. The new 43-test suite and Release stage need a new Windows Jenkins run. The pipeline timeout is 30 minutes; Deploy and Release each have a five-minute limit. Concurrent runs of this job are disabled. Use one Jenkins job targeting `*/main` for these fixed staging and production environments.
 
 ## Configure SonarQube Cloud
 
@@ -228,7 +230,7 @@ The replacement image uses a refreshed Alpine base and copies only the Node exec
 
 Build #5 completed the replacement-image run successfully: Docker built Alpine 3.24.2, all 37 tests then present passed, SonarQube passed, the HIGH/CRITICAL table reported zero findings for both the OS and application package target, and the source scan found no secret patterns. Its console ended with `Finished: SUCCESS`. This verifies the configured gate, rather than proving the absence of every vulnerability. The log's EOL-list warning reflects missing Alpine 3.24 support-date metadata in Trivy 0.74.0; scanning continued.
 
-Keep build #4's console and reports alongside build #5's reports. The new Deploy stage will also exercise the running Alpine application and its database volume; collect that separate result before claiming deployment validation.
+Keep build #4's console and reports alongside build #5's reports. Build #6 additionally verified the running Alpine application in staging, and build #7 verified rollback while retaining its stored task.
 
 ## Run the Deploy stage
 
@@ -238,17 +240,18 @@ Deploy runs only after Build, Test, Code Quality and Security pass. It uses Dock
 | --- | --- | --- | --- |
 | Development (manual Compose) | `http://localhost:3000` | Managed by `compose.yaml` | `sit223-hd-task-manager_task-data` |
 | Staging (Jenkins Deploy) | `http://localhost:3001` | `sit223-hd-staging` | `sit223-hd-staging_staging-data` |
+| Production (Jenkins Release) | `http://localhost:3002` | `sit223-hd-production` | `sit223-hd-production_production-data` |
 
 The staging service runs as the image's non-root user, has a read-only root filesystem and writable data volume, and binds only to the Jenkins computer's loopback address. It remains running after a successful pipeline so it can be inspected in a browser. These are separate environments on the same Docker engine, not separate physical servers or a public deployment.
 
 ### First deployment and evidence
 
 1. Review and merge the Deploy pull request into `main`. Keep Docker Desktop running and ensure port 3001 is available.
-2. Run the existing Jenkins job. If **Build with Parameters** is shown, leave **VERIFY_STAGING_ROLLBACK** unchecked for a normal deployment. The first run after merging may still show **Build Now** until Jenkins loads the parameter definition.
-3. Confirm all 42 tests and both gates pass, followed by the fifth stage, **Deploy**. Compose waits up to 90 seconds for the image's health check; startup failure or timeout blocks the stage.
+2. Run the existing Jenkins job. If **Build with Parameters** is shown, leave both rollback options unchecked for a normal deployment and release. The first run after merging may still show **Build Now** until Jenkins loads the parameter definitions.
+3. Confirm all 43 tests and both gates pass, followed by the fifth stage, **Deploy**. Compose waits up to 90 seconds for the image's health check; startup failure or timeout blocks the stage. After Deploy succeeds, Release runs automatically.
 4. Open `http://localhost:3001` on the Jenkins computer. The page should identify the environment as `staging` and show the current `build-N` version. Open `/health` to confirm those values and `status: ok`.
 5. Create a task manually and refresh the page. After another normal Jenkins deployment, confirm that task is still there. The named volume is reused; the pipeline's smoke checks delete only the temporary task they create.
-6. Save the five-stage pipeline screenshot, staging page and the build's **Artifacts > reports > deploy** files. The archive page can download that directory as a ZIP.
+6. Save the pipeline screenshot, staging page and the build's **Artifacts > reports > deploy** files. The archive page can download that directory as a ZIP.
 
 The smoke client checks health and release identity before writing anything, then checks HTML/CSS/JavaScript responses, creates a unique task, reads and filters it, marks it done, checks metrics and deletes it. It fails on any unexpected response, including cleanup failure. A separate Windows-host health request verifies the published port, rather than relying solely on HTTP within Docker.
 
@@ -275,14 +278,56 @@ Rollback restores the previous application image using the current Compose confi
 
 For a port conflict, free port 3001 or deliberately change the staging port consistently in Compose and the Jenkins URL. For a health or smoke failure, read the failed-container log and `smoke-test.json`; for an unknown Compose option, check Docker Desktop's Compose version. Do not delete the staging data volume to make an error disappear.
 
+## Run the Release stage
+
+Release promotes the image already verified by Deploy into the production demonstration environment. It runs automatically after the preceding stages succeed; no separate approval click or new credential is required. A staging rollback demonstration fails Deploy, so Release cannot run in that build. The two rollback demonstration options cannot be selected together.
+
+`compose.production.yaml` defines a separate Compose project, container, network and persistent database volume. Only the application image is promoted: staging tasks are not copied to production. Production binds to `127.0.0.1:3002`, uses `APP_ENV=production`, and retains the image's `APP_VERSION=build-N`. It has the same non-root user, read-only root filesystem, limited container privileges and bounded log files as staging. This is a local production environment for the assessment; it is not a public business deployment.
+
+The source guard compares `GIT_COMMIT` with `refs/remotes/origin/main` fetched by the Jenkins checkout. This does not query whether a newer commit reached GitHub during the build. Jenkins also requires this build's passing deployment report and a healthy staging container owned by the expected Compose project/service, running the expected image ID. Production starts with `--no-build --pull never` and the immutable image ID. Its running ID must match the image built, scanned and staged.
+
+Production must pass Docker health, the same seven HTTP smoke checks and a health/version/environment request through the published Windows port. The smoke check creates one temporary task and deletes it; existing user tasks are retained. After these checks pass, Jenkins creates `sit223-hd-task-manager:release-N-COMMIT`, where `N` is the build number and `COMMIT` is the first 12 characters of the source commit. For example, a hypothetical build 8 at commit `abcdef123456...` would use `release-8-abcdef123456`. The tag points to the existing image and does not rebuild it. The pipeline refuses to overwrite an existing release tag and verifies the new tag's image ID.
+
+The app continues to display `build-N`; the archived release manifest links that version to the release tag and full source commit. Images and tags are kept in this Docker engine's local image store. No registry upload or Git tag is created. Docker tags remain mutable outside the pipeline, so the archived image ID is the authoritative artifact identity. Keep prior release images available for rollback.
+
+### First release and evidence
+
+1. Review and merge the Release pull request into `main`. Keep Docker Desktop running and ensure port 3002 is available.
+2. Open the existing Jenkins job's **Build with Parameters**. Leave **VERIFY_STAGING_ROLLBACK** unchecked, and leave **VERIFY_PRODUCTION_ROLLBACK** unchecked if it is already shown. The new parameter may appear only after Jenkins first loads the updated Jenkinsfile.
+3. Run the complete pipeline. Confirm 43 tests and all six assessed stages pass. The automatic **Checkout SCM** step does not count as an assessed stage.
+4. Open `http://localhost:3001` and `http://localhost:3002`. Both should show the current `build-N`, with `staging` and `production` respectively. `/health` on port 3002 must return `status: ok`, the current version and `environment: production`.
+5. Production initially has its own empty task list. Create a task called `Production check`, refresh the page and confirm it remains. Confirm it does not appear in staging, and that the earlier staging task still exists there. After another successful release, confirm the production task remains too.
+6. Save the six-stage pipeline screenshot, both browser pages, and **Build Artifacts > reports > release**. Read `release-result.txt` and `release-manifest.txt`; compare the image ID with `reports/security/scan-context.txt`, `reports/deploy/deployment-result.txt` and `promoted-from-staging.json`.
+
+| Release artifact | Purpose |
+| --- | --- |
+| `release-context.txt` | Candidate build, commit, image ID, tag, environments and demonstration setting |
+| `release-result.txt` | `PASSED`, `FAILED` or `NOT_COMPLETED`; authoritative outcome of this release attempt |
+| `release-manifest.txt`, `release-image.json` | Verified release tag, image identity and source/build traceability; produced after all checks pass |
+| `promoted-from-staging.json` | Staging container identity/state captured immediately before promotion |
+| `compose-version.txt`, `compose-resolved.yaml` | Compose version and resolved production configuration for this attempt |
+| `previous-image.txt`, `previous-container.json` | Previous production image and configuration, if one existed |
+| `smoke-test.json`, `host-health.json` | Production HTTP checks and the Windows-host health response |
+| `final-container.json`, `final-container.log` | Production state/logs after release or recovery |
+| `failed-container.json`, `failed-container.log`, `rollback-result.txt` | Failed attempt and recovery outcome, when applicable |
+
+### Release failure and optional rollback demonstration
+
+A failed Build, Test, Code Quality, Security or Deploy stage prevents Release from starting and leaves the existing production service running. A failed Release preflight also leaves it in place. Jenkins refuses to replace a same-name production container belonging to another project. After replacement begins, a startup failure, image mismatch or failed HTTP check triggers an attempt to restore the previous production image and wait for Docker health. The restored image ID is checked. A failed first release has no previous image; Jenkins stops the failed service and retains its volume. A successful rollback still ends the build with `FAILURE`.
+
+After one production release succeeds, create `Production check` and record the displayed build version. Run **Build with Parameters** with only **VERIFY_PRODUCTION_ROLLBACK** checked. Deploy should update staging normally; Release should validate the candidate, deliberately fail before creating its release tag, then restore the previous production image. Expect a red build with the message `Intentional Release failure requested to demonstrate production rollback after all checks passed.` In **reports/release/rollback-result.txt**, look for `PASSED: previous production image restored and healthy`. Refresh production: its previous version and stored task should remain. Staging stays on the newer build, showing that the environments are independent. Leave both options unchecked for subsequent normal runs.
+
+If a failure occurs after release-tag creation, Jenkins attempts to remove that new tag and invalidates any manifest; `release-result.txt` records tag cleanup as well as recovery. Previous release tags are retained. Missing artifacts or `NOT_COMPLETED` after interruption never establish a passing release. A hard timeout or abrupt Docker/Jenkins shutdown can interrupt recovery and cleanup; inspect the final container and reports before retrying.
+
+Rollback restores the previous application image using the current production Compose configuration. It does not revert database contents, schema or configuration changes. Replacing a single container causes brief downtime. Keep schema changes backward compatible or provide a separately reviewed migration/recovery procedure. Do not delete either data volume or prune previous release images to resolve a failed release. For a port conflict, free port 3002 or change both the Compose mapping and `PRODUCTION_URL` consistently.
+
 ## Remaining stages to implement
 
 | Assessed stage | Next implementation |
 | --- | --- |
-| Release | Promote the same tested image to a separate production demonstration environment, with its own configuration and database volume. Verify the release and provide rollback handling. |
 | Monitoring and Alerting | Collect the application's metrics with Prometheus, configure alert rules and a working notification receiver, then demonstrate a failure and recovery. |
 
-The current `/metrics` endpoint and its Deploy check are preparation for monitoring. A running collector and actual alert delivery are still required. Deploy automation is now prepared and needs its real Jenkins verification; Release automation is the next implementation after that.
+The current `/metrics` endpoint and its deployment/release checks are preparation for monitoring. A running collector and actual alert delivery are still required. Release automation is now prepared and needs its real Windows Jenkins verification before monitoring is added.
 
 ## Assessment evidence to collect as we progress
 
@@ -300,9 +345,13 @@ The user's Windows Jenkins build #4 verified the Security container mounts, imag
 
 The user's Windows Jenkins build #5 verified the Alpine image, non-root test reports, SonarQube and the configured Security gate. The source-secret scan found no patterns and the displayed HIGH/CRITICAL image results were zero.
 
-The new 42-test suite passed locally on Node.js 24.19.0, with 100% lines, 98.97% branches and 100% functions across the four backend modules and smoke script. JUnit contains 42 cases without failures, and all five LCOV source paths resolve. The smoke tests cover real HTTP requests, wrong release/environment rejection, failure cleanup and a nonzero CLI exit status.
+The user's Windows Jenkins build #6 checked out `d1b7bd45b422504ff84d59437d3e93c72503543b`, passed all 42 tests then present, passed SonarQube and Security, and deployed `build-6` to staging. Docker health, HTTP smoke checks and the Windows-host health request all completed; the pipeline finished successfully. A browser screenshot showed the staging version and a user-created `Deployment check` task.
 
-Docker, Jenkins, Windows PowerShell and Trivy execution are unavailable in the preparation environment. The staging Compose launch, published Windows port, bind mount and rollback still need real Windows Jenkins runs. The local tests do not establish that those integration steps succeeded. Generate and use those real deployment reports for assessment evidence.
+Build #7 passed the same tests/gates and deliberately failed Deploy after its checks. Its rollback report confirmed the previous healthy image `sha256:701b6a1bea87e475c9d229d644555f9ef2192be9a781279d6d7e855b2657d1b9` was restored. The refreshed browser showed `build-6` and the retained `Deployment check` task. This verifies the staging image rollback and data retention for that demonstration; build #7 correctly ended with `FAILURE`.
+
+The Release change adds a test that runs the production smoke CLI against a real local HTTP server, checks production identity, verifies the successful exit/report and confirms preservation of an existing task. It also checks that a staging identity expectation is rejected before task changes. All 43 tests passed locally on Node.js 24.19.0, with 100% lines, 99.48% branches and 100% functions across the four backend modules and smoke script. The generated JUnit contains 43 cases without failures or errors, and all five LCOV source paths resolve. The three Compose files parse with separate project names, ports and volume mounts; these are static configuration checks, not Docker execution.
+
+Docker, Jenkins, Windows PowerShell and Trivy execution are unavailable in the preparation environment. Production Compose launch, host-port checks, release tagging and production rollback still need real Windows Jenkins runs. Local application tests and static configuration checks do not establish that those integration steps succeeded. Generate and use those real release reports for assessment evidence.
 
 ## Technical references
 
@@ -311,6 +360,8 @@ Docker, Jenkins, Windows PowerShell and Trivy execution are unavailable in the p
 - [Docker multi-stage builds](https://docs.docker.com/build/building/multi-stage/)
 - [Docker Compose deployment and health waiting](https://docs.docker.com/reference/cli/docker/compose/up/)
 - [Docker named volumes and persistence](https://docs.docker.com/engine/storage/volumes/)
+- [Docker Compose project names and environment isolation](https://docs.docker.com/compose/how-tos/project-name/)
+- [Docker image tags referencing existing images](https://docs.docker.com/reference/cli/docker/image/tag/)
 - [Official Node image guidance for a smaller runtime without npm/Yarn](https://github.com/nodejs/docker-node/blob/main/docs/BestPractices.md#smaller-images-without-npmyarn)
 - [Official Node 24 Alpine 3.24 image definition](https://github.com/nodejs/docker-node/blob/main/24/alpine3.24/Dockerfile)
 - [Docker build options for pulling base images and disabling cache](https://docs.docker.com/reference/cli/docker/buildx/build/)
