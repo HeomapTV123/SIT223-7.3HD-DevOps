@@ -9,7 +9,8 @@ const services = [
   { name: 'alertmanager', uid: 65534, gid: 65534 },
   { name: 'grafana', uid: 472, gid: 0 },
 ];
-const openssl = (...args) => execFileSync('openssl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+// The Alpine tool image installs OpenSSL here; never select the CA tool through PATH.
+const openssl = (...args) => execFileSync('/usr/bin/openssl', args, { stdio: ['ignore', 'pipe', 'pipe'] });
 const publicKey = (key) => key.export({ type: 'spki', format: 'der' });
 
 function installFile(directory, name, contents, mode, owner) {
