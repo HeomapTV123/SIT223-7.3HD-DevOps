@@ -8,7 +8,10 @@ rule_files:
   - /etc/prometheus/alerts.yml
 alerting:
   alertmanagers:
-    - static_configs:
+    - scheme: https
+      tls_config:
+        ca_file: /etc/monitoring/ca/ca.crt
+      static_configs:
         - targets: [alertmanager:9093]
 scrape_configs:
   - job_name: taskboard-production
@@ -17,8 +20,14 @@ scrape_configs:
         labels:
           environment: production
   - job_name: prometheus
+    scheme: https
+    tls_config:
+      ca_file: /etc/monitoring/ca/ca.crt
     static_configs:
       - targets: [localhost:9090]
   - job_name: alertmanager
+    scheme: https
+    tls_config:
+      ca_file: /etc/monitoring/ca/ca.crt
     static_configs:
       - targets: [alertmanager:9093]

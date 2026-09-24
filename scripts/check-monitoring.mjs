@@ -96,11 +96,15 @@ function queryValue(response) {
 }
 
 export async function monitoringSnapshot({
-  prometheusUrl = 'http://prometheus:9090', alertmanagerUrl = 'http://alertmanager:9093',
-  grafanaUrl = 'http://grafana:3000', fetchImpl = fetch, requestTimeoutMs = 5000,
+  prometheusUrl = 'https://prometheus:9090', alertmanagerUrl = 'https://alertmanager:9093',
+  grafanaUrl = 'https://grafana:3000', fetchImpl = fetch, requestTimeoutMs = 5000,
 } = {}) {
   const get = async (base, path, json = true) => {
-    const response = await fetchImpl(new URL(path, base), { signal: AbortSignal.timeout(requestTimeoutMs) });
+    const endpoint = new URL(path, base);
+    if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password) {
+      throw new Error('Monitoring endpoints must use HTTPS without URL credentials.');
+    }
+    const response = await fetchImpl(endpoint, { signal: AbortSignal.timeout(requestTimeoutMs), redirect: 'error' });
     if (!response.ok) throw new Error(`Monitoring endpoint ${path} returned HTTP ${response.status}.`);
     return json ? response.json() : response.text();
   };
@@ -127,7 +131,7 @@ export async function monitoringSnapshot({
     rules: rules.data.groups.flatMap((group) => group.rules).filter((rule) => requiredRules.includes(rule.name))
       .map(({ name, health: ruleHealth, lastError }) => ({ name, health: ruleHealth, lastError })),
     prometheusAlerts: promAlerts.data.alerts.filter(productionAlert),
-    alertmanagerConnected: managers.data.activeAlertmanagers.some((manager) => manager.url === 'http://alertmanager:9093/api/v2/alerts'),
+    alertmanagerConnected: managers.data.activeAlertmanagers.some((manager) => manager.url === 'https://alertmanager:9093/api/v2/alerts'),
     alertmanagerAlerts: amAlerts.filter(productionAlert),
     email: { receiver: 'availability-email', requests, failed, succeeded: requests - failed, startedAt },
     grafana: { database: health.database, dashboardUid: dashboard.dashboard?.uid, up: queryValue(grafanaQuery) },
@@ -197,15 +201,22 @@ export function monitoringCommand(args, readReport = readFileSync) {
   return { phase, baseline };
 }
 
+// Preserve JSON data while preventing API/error text from creating log lines or terminal commands.
+export function reportJson(value) {
+  return JSON.stringify(value).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g,
+    (character) => '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0'));
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
+    if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') throw new Error('TLS certificate verification must remain enabled.');
     const { phase, baseline } = monitoringCommand(process.argv.slice(2));
     const result = await waitForMonitoring(phase, { baseline,
       prometheusUrl: process.env.PROMETHEUS_URL, alertmanagerUrl: process.env.ALERTMANAGER_URL,
       grafanaUrl: process.env.GRAFANA_URL });
-    console.log(JSON.stringify(result, null, 2));
+    console.log(reportJson(result));
   } catch (error) {
-    console.log(JSON.stringify({ status: 'FAILED', reason: error.message, snapshot: error.snapshot }, null, 2));
+    console.log(reportJson({ status: 'FAILED', reason: error.message, snapshot: error.snapshot }));
     process.exitCode = 1;
   }
 }

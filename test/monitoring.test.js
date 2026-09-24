@@ -1,12 +1,32 @@
-import test from 'node:test';
+import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer } from 'node:https';
+import { getCACertificates, setDefaultCACertificates } from 'node:tls';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { emailConfiguration, installEmailConfiguration } from '../scripts/configure-monitoring.mjs';
-import { metricSum, monitoringCommand, monitoringSnapshot, phaseSatisfied, waitForMonitoring } from '../scripts/check-monitoring.mjs';
+import { metricSum, monitoringCommand, monitoringSnapshot, phaseSatisfied, waitForMonitoring, reportJson } from '../scripts/check-monitoring.mjs';
+
+import { installMonitoringTls } from '../scripts/configure-monitoring-tls.mjs';
+
+const tlsDirectory = mkdtempSync(join(tmpdir(), 'taskboard-test-tls-'));
+const originalCAs = getCACertificates('default');
+let trustedCAs;
+let serverTls;
+const caPath = join(tlsDirectory, 'public/ca.crt');
+before(() => {
+  installMonitoringTls(tlsDirectory, { setOwners: false });
+  trustedCAs = [...originalCAs, readFileSync(caPath, 'utf8')];
+  setDefaultCACertificates(trustedCAs);
+  serverTls = { cert: readFileSync(join(tlsDirectory, 'prometheus/server.crt')),
+    key: readFileSync(join(tlsDirectory, 'prometheus/server.key')) };
+});
+after(() => {
+  setDefaultCACertificates(originalCAs);
+  rmSync(tlsDirectory, { recursive: true, force: true });
+});
 
 const emailEnv = () => ({ SMTP_SMARTHOST: 'smtp.example.org:587', SMTP_USERNAME: 'sender@example.org',
   SMTP_PASSWORD: 'test-only-placeholder', SMTP_FROM: '', ALERT_EMAIL_TO: 'receiver@example.org' });
@@ -55,20 +75,21 @@ test('private config installation rotates the password and leaves existing confi
 
 async function fixture(t) {
   const state = { up: 1, requests: 0, failed: 0, startedAt: 12345, phase: 'healthy',
-    silence: false, failPath: '', badResponse: false, badRules: false };
+    silence: false, failPath: '', badResponse: false, badRules: false, lastError: '', redirectPath: '' };
   const alert = () => ({ labels: { alertname: 'TaskboardDown', environment: 'production' },
     state: state.phase, status: { state: state.silence ? 'suppressed' : 'active',
       silencedBy: state.silence ? ['test-silence'] : [], inhibitedBy: [] } });
   const query = () => ({ status: 'success', data: { result: [{ value: [Date.now() / 1000, String(state.up)] }] } });
-  const server = createServer((request, response) => {
-    const path = new URL(request.url, 'http://localhost').pathname;
+  const server = createServer(serverTls, (request, response) => {
+    const path = new URL(request.url, 'https://localhost').pathname;
+    if (path === state.redirectPath) { response.writeHead(302, { Location: 'http://127.0.0.1:1/untrusted' }).end(); return; }
     if (path === state.failPath) { response.writeHead(503).end('unavailable'); return; }
     let result;
     switch (path) {
-      case '/api/v1/targets': result = { status: 'success', data: { activeTargets: [{ labels: { job: 'taskboard-production' }, health: state.up ? 'up' : 'down', lastScrape: new Date().toISOString(), lastError: state.up ? '' : 'connection refused' }] } }; break;
+      case '/api/v1/targets': result = { status: 'success', data: { activeTargets: [{ labels: { job: 'taskboard-production' }, health: state.up ? 'up' : 'down', lastScrape: new Date().toISOString(), lastError: state.lastError || (state.up ? '' : 'connection refused') }] } }; break;
       case '/api/v1/rules': result = { status: 'success', data: { groups: [{ rules: ['TaskboardDown', 'TaskboardHighErrorRate', 'TaskboardHighMemory'].map((name) => ({ name, health: state.badRules ? 'err' : 'ok' })) }] } }; break;
       case '/api/v1/alerts': result = { status: 'success', data: { alerts: state.phase === 'healthy' ? [] : [alert()] } }; break;
-      case '/api/v1/alertmanagers': result = { status: 'success', data: { activeAlertmanagers: [{ url: 'http://alertmanager:9093/api/v2/alerts' }] } }; break;
+      case '/api/v1/alertmanagers': result = { status: 'success', data: { activeAlertmanagers: [{ url: 'https://alertmanager:9093/api/v2/alerts' }] } }; break;
       case '/api/v1/query': case '/api/datasources/proxy/uid/taskboard-prometheus/api/v1/query': result = query(); break;
       case '/api/v2/alerts': result = state.phase === 'firing' ? [alert()] : []; break;
       case '/metrics': response.end([
@@ -87,17 +108,49 @@ async function fixture(t) {
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); });
-  const url = `http://127.0.0.1:${server.address().port}`;
+  const url = `https://127.0.0.1:${server.address().port}`;
   return { state, options: { prometheusUrl: url, alertmanagerUrl: url, grafanaUrl: url, timeoutMs: 5000, intervalMs: 1 } };
 }
 
-test('monitoring checks real HTTP APIs, production metrics, dashboard and datasource before passing', async (t) => {
+test('monitoring checks real verified-HTTPS APIs, production metrics, dashboard and datasource before passing', async (t) => {
   const { options } = await fixture(t);
   const result = await waitForMonitoring('ready', options);
   assert.equal(result.status, 'PASSED');
   assert.equal(result.email.succeeded, 0);
   assert.match(result.emailEvidence, /NOT_TESTED/);
   assert.equal(result.grafana.up, 1);
+});
+
+test('monitoring rejects plaintext endpoints and credentials in URLs before making a request', async () => {
+  for (const url of ['http://prometheus:9090', 'https://user:password@prometheus:9090']) {
+    let requests = 0;
+    await assert.rejects(monitoringSnapshot({ prometheusUrl: url, alertmanagerUrl: url, grafanaUrl: url,
+      fetchImpl: () => { requests++; throw new Error('Must not make an insecure request.'); } }), /must use HTTPS/);
+    assert.equal(requests, 0);
+  }
+});
+
+test('monitoring rejects untrusted certificates and redirects instead of downgrading transport', async (t) => {
+  const { state, options } = await fixture(t);
+  setDefaultCACertificates(originalCAs);
+  try {
+    await assert.rejects(monitoringSnapshot(options), (error) => {
+      assert.match(error.cause?.code || '', /CERT|ISSUER/);
+      return true;
+    });
+  } finally {
+    setDefaultCACertificates(trustedCAs);
+  }
+  state.redirectPath = '/api/health';
+  await assert.rejects(monitoringSnapshot(options), /fetch failed/);
+});
+
+test('JSON reports encode log delimiters and terminal controls while preserving diagnostic data', () => {
+  const input = { status: 'FAILED', reason: 'bad\r\nPASSED\u001b[31m\u007f\u0085\u2028\u2029',
+    snapshot: { label: 'quote" slash\\ tab\t null\0' } };
+  const report = reportJson(input);
+  assert.doesNotMatch(report, /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/);
+  assert.deepEqual(JSON.parse(report), input);
 });
 
 test('failed SMTP requests, pending alerts and silences cannot pass an outage demonstration', async (t) => {
@@ -250,13 +303,24 @@ test('monitoring CLI rejects relative and absolute report path arguments before 
   }
 });
 
+test('monitoring CLI refuses an environment that disables TLS certificate verification', async () => {
+  const result = await runNode(['scripts/check-monitoring.mjs', 'ready'], { NODE_TLS_REJECT_UNAUTHORIZED: '0' });
+  assert.equal(result.code, 1);
+  assert.match(JSON.parse(result.stdout).reason, /verification must remain enabled/);
+});
+
 test('monitoring CLI emits usable JSON and returns a nonzero status for invalid execution', async (t) => {
-  const { options } = await fixture(t);
+  const { state, options } = await fixture(t);
+  state.lastError = 'untrusted\r\nFAKE PASSED\u001b[31m\u0085\u2028\u2029';
   const result = await runNode(['scripts/check-monitoring.mjs', 'ready'], {
+    NODE_EXTRA_CA_CERTS: caPath,
     PROMETHEUS_URL: options.prometheusUrl, ALERTMANAGER_URL: options.alertmanagerUrl, GRAFANA_URL: options.grafanaUrl,
   });
   assert.equal(result.code, 0);
   assert.equal(JSON.parse(result.stdout).status, 'PASSED');
+  assert.equal(JSON.parse(result.stdout).targets[0].lastError, state.lastError);
+  assert.equal(result.stdout.split('\n').length, 2);
+  assert.doesNotMatch(result.stdout.trimEnd(), /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/);
   const failed = await runNode(['scripts/check-monitoring.mjs', 'firing']);
   assert.equal(failed.code, 1);
   assert.equal(JSON.parse(failed.stdout).status, 'FAILED');
