@@ -29,7 +29,8 @@ ENV NODE_ENV=production \
     APP_VERSION=${APP_VERSION}
 
 FROM base AS monitoring-tools
-RUN apk add --no-cache openssl
+RUN apk add --no-cache openssl \
+    && /usr/bin/openssl version
 COPY scripts/configure-monitoring-tls.mjs ./scripts/
 
 FROM monitoring-tools AS monitoring-tls

@@ -53,6 +53,27 @@ test('TLS provisioning fails on an incomplete CA instead of silently replacing t
   assert.deepEqual(readdirSync(join(directory, 'authority')), ['ca.crt']);
 });
 
+test('TLS provisioning ignores an OpenSSL executable supplied through PATH', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'taskboard-shadow-openssl-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const untrustedBin = join(directory, 'bin');
+  mkdirSync(untrustedBin);
+  writeFileSync(join(untrustedBin, 'openssl'), '#!/bin/sh\nprintf "Unexpected OpenSSL from PATH\\n" >&2\nexit 99\n', { mode: 0o755 });
+  const certificateDirectory = join(directory, 'certificates');
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e',
+    "import { installMonitoringTls } from './scripts/configure-monitoring-tls.mjs'; installMonitoringTls(process.argv[1], { setOwners: false });",
+    certificateDirectory], {
+    env: { ...process.env, PATH: untrustedBin }, encoding: 'utf8', timeout: 30000,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, '');
+  const ca = new X509Certificate(readFileSync(join(certificateDirectory, 'public/ca.crt')));
+  const certificate = new X509Certificate(readFileSync(join(certificateDirectory, 'prometheus/server.crt')));
+  assert.ok(certificate.verify(ca.publicKey));
+  assert.equal(certificate.checkHost('prometheus'), 'prometheus');
+});
+
 test('TLS provisioning CLI rejects supplied paths before accessing any certificate volume', () => {
   const result = spawnSync(process.execPath, ['scripts/configure-monitoring-tls.mjs', '../../untrusted'], { encoding: 'utf8' });
   assert.equal(result.status, 1);
