@@ -7,6 +7,8 @@ const result = spawnSync(process.execPath, [
   '--test', '--experimental-test-coverage',
   '--test-coverage-include=src/**/*.js', '--test-coverage-exclude=src/server.js',
   '--test-coverage-include=scripts/smoke-deploy.mjs',
+  '--test-coverage-include=scripts/configure-monitoring.mjs',
+  '--test-coverage-include=scripts/check-monitoring.mjs',
   '--test-coverage-lines=85', '--test-coverage-branches=75', '--test-coverage-functions=85',
   '--test-reporter=junit', '--test-reporter-destination=reports/junit.xml',
   '--test-reporter=lcov', '--test-reporter-destination=reports/lcov.info',

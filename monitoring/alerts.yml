@@ -1,0 +1,36 @@
+groups:
+  - name: taskboard-production
+    rules:
+      - alert: TaskboardDown
+        expr: up{job="taskboard-production"} == 0 or absent(up{job="taskboard-production"})
+        for: 1m
+        labels:
+          severity: critical
+          environment: production
+        annotations:
+          summary: Taskboard production is unavailable
+          description: Production metrics have been unreachable for at least one minute. Check the production container, health endpoint and logs.
+      - alert: TaskboardHighErrorRate
+        expr: |
+          (
+            sum(rate(taskboard_http_requests_total{job="taskboard-production",route!~"/(health|metrics)",status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(taskboard_http_requests_total{job="taskboard-production",route!~"/(health|metrics)"}[5m])), 0.001)
+          ) > 0.05
+          and sum(increase(taskboard_http_requests_total{job="taskboard-production",route!~"/(health|metrics)"}[5m])) >= 20
+        for: 2m
+        labels:
+          severity: warning
+          environment: production
+        annotations:
+          summary: Taskboard production has sustained server errors
+          description: More than 5 percent of application requests returned 5xx over five minutes, with at least 20 requests; the condition persisted for two minutes.
+      - alert: TaskboardHighMemory
+        expr: taskboard_resident_memory_bytes{job="taskboard-production"} > 268435456
+        for: 5m
+        labels:
+          severity: warning
+          environment: production
+        annotations:
+          summary: Taskboard production memory is high
+          description: The Node process has used more than 256 MiB of resident memory for five minutes. Inspect workload and memory use.

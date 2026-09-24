@@ -1,0 +1,119 @@
+rule_files:
+- /etc/prometheus/alerts.yml
+evaluation_interval: 10s
+tests:
+- name: availability waits one minute, fires, and resolves on recovery
+  interval: 10s
+  input_series:
+  - series: up{job="taskboard-production",instance="sit223-hd-production:3000",environment="production"}
+    values: 1x2 0x7 1x3
+  alert_rule_test:
+  - eval_time: 20s
+    alertname: TaskboardDown
+    exp_alerts: []
+  - eval_time: 80s
+    alertname: TaskboardDown
+    exp_alerts: []
+  - eval_time: 90s
+    alertname: TaskboardDown
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        environment: production
+        job: taskboard-production
+        instance: sit223-hd-production:3000
+      exp_annotations: &id001
+        summary: Taskboard production is unavailable
+        description: Production metrics have been unreachable for at least one minute.
+          Check the production container, health endpoint and logs.
+  - eval_time: 110s
+    alertname: TaskboardDown
+    exp_alerts: []
+- name: missing production target also alerts
+  interval: 10s
+  input_series: []
+  alert_rule_test:
+  - eval_time: 50s
+    alertname: TaskboardDown
+    exp_alerts: []
+  - eval_time: 60s
+    alertname: TaskboardDown
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        environment: production
+        job: taskboard-production
+      exp_annotations: *id001
+- name: memory requires five minutes and clears after recovery
+  interval: 10s
+  input_series:
+  - series: taskboard_resident_memory_bytes{job="taskboard-production",instance="sit223-hd-production:3000",environment="production"}
+    values: 300000000x31 100000000x2
+  alert_rule_test:
+  - eval_time: 290s
+    alertname: TaskboardHighMemory
+    exp_alerts: []
+  - eval_time: 300s
+    alertname: TaskboardHighMemory
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        environment: production
+        job: taskboard-production
+        instance: sit223-hd-production:3000
+      exp_annotations:
+        summary: Taskboard production memory is high
+        description: The Node process has used more than 256 MiB of resident memory
+          for five minutes. Inspect workload and memory use.
+  - eval_time: 320s
+    alertname: TaskboardHighMemory
+    exp_alerts: []
+- name: sustained application errors trigger above threshold
+  interval: 10s
+  input_series:
+  - series: taskboard_http_requests_total{job="taskboard-production",instance="sit223-hd-production:3000",environment="production",method="GET",route="/api/tasks",status="500"}
+    values: 0+2x40
+  - series: taskboard_http_requests_total{job="taskboard-production",instance="sit223-hd-production:3000",environment="production",method="GET",route="/api/tasks",status="200"}
+    values: 0+8x40
+  alert_rule_test:
+  - eval_time: 60s
+    alertname: TaskboardHighErrorRate
+    exp_alerts: []
+  - eval_time: 180s
+    alertname: TaskboardHighErrorRate
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        environment: production
+      exp_annotations:
+        summary: Taskboard production has sustained server errors
+        description: More than 5 percent of application requests returned 5xx over
+          five minutes, with at least 20 requests; the condition persisted for two
+          minutes.
+- name: low request volume does not trigger error alert
+  interval: 10s
+  input_series:
+  - series: taskboard_http_requests_total{job="taskboard-production",instance="sit223-hd-production:3000",environment="production",method="GET",route="/api/tasks",status="500"}
+    values: 0 1x40
+  alert_rule_test:
+  - eval_time: 180s
+    alertname: TaskboardHighErrorRate
+    exp_alerts: []
+  - eval_time: 360s
+    alertname: TaskboardHighErrorRate
+    exp_alerts: []
+- name: healthy application traffic excludes health and metrics errors
+  interval: 10s
+  input_series:
+  - series: taskboard_http_requests_total{job="taskboard-production",instance="sit223-hd-production:3000",environment="production",method="GET",route="/api/tasks",status="500"}
+    values: 0+1x40
+  - series: taskboard_http_requests_total{job="taskboard-production",instance="sit223-hd-production:3000",environment="production",method="GET",route="/api/tasks",status="200"}
+    values: 0+99x40
+  - series: taskboard_http_requests_total{job="taskboard-production",instance="sit223-hd-production:3000",environment="production",method="GET",route="/health",status="500"}
+    values: 0+1000x40
+  - series: taskboard_http_requests_total{job="taskboard-production",instance="sit223-hd-production:3000",environment="production",method="GET",route="/metrics",status="500"}
+    values: 0+1000x40
+  alert_rule_test:
+  - eval_time: 360s
+    alertname: TaskboardHighErrorRate
+    exp_alerts: []
