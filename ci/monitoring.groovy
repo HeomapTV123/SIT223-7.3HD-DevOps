@@ -1,6 +1,7 @@
 // Runs in the Windows Jenkins workspace after this build's successful Release.
 env.MONITOR_TOOL_CONTAINER = "sit223-hd-monitor-tool-${env.BUILD_TAG}".replaceAll('[^a-zA-Z0-9_.-]', '-')
 env.MONITOR_CONFIG_CONTAINER = "sit223-hd-monitor-config-${env.BUILD_TAG}".replaceAll('[^a-zA-Z0-9_.-]', '-')
+env.MONITOR_TLS_IMAGE = "sit223-hd-monitoring-tls:${env.APP_VERSION}"
 dir('reports/monitoring') {
     deleteDir()
     writeFile file: 'monitoring-result.txt', text: 'Monitoring: NOT_COMPLETED\n'
@@ -36,8 +37,24 @@ foreach ($name in @('sit223-hd-prometheus', 'sit223-hd-alertmanager', 'sit223-hd
     bat 'docker compose --project-name %MONITORING_PROJECT% --file compose.monitoring.yaml config > reports/monitoring/compose-resolved.yaml'
     bat 'docker compose --project-name %MONITORING_PROJECT% --file compose.monitoring.yaml pull'
     bat 'docker image inspect %PROMETHEUS_IMAGE% %ALERTMANAGER_IMAGE% %GRAFANA_IMAGE% > reports/monitoring/monitor-images.json'
+    // CA signing key is only mounted into this offline provisioning container.
+    for (String volume in ['tls-authority', 'tls-public', 'tls-prometheus', 'tls-alertmanager', 'tls-grafana']) {
+        bat "docker volume create sit223-hd-monitoring_${volume}"
+    }
+    bat 'docker build --target monitoring-tls --build-arg APP_VERSION=%APP_VERSION% -t "%MONITOR_TLS_IMAGE%" .'
+    bat 'docker image inspect "%MONITOR_TLS_IMAGE%" > reports/monitoring/tls-tool-image.json'
     bat '''@echo off
-docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network none --read-only --tmpfs /tmp --cap-drop ALL --volume "%WORKSPACE%/monitoring:/etc/prometheus:ro" --entrypoint /bin/promtool "%PROMETHEUS_IMAGE%" check config /etc/prometheus/prometheus.yml > reports/monitoring/prometheus-config-check.txt 2>&1
+docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network none --read-only --cap-drop ALL --cap-add CHOWN --security-opt no-new-privileges:true --volume sit223-hd-monitoring_tls-authority:/tls/authority --volume sit223-hd-monitoring_tls-public:/tls/public --volume sit223-hd-monitoring_tls-prometheus:/tls/prometheus --volume sit223-hd-monitoring_tls-alertmanager:/tls/alertmanager --volume sit223-hd-monitoring_tls-grafana:/tls/grafana "%MONITOR_TLS_IMAGE%"
+'''
+    // Only the public CA certificate and certificate metadata leave the TLS volumes.
+    bat '''@echo off
+docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network none --read-only --cap-drop ALL --volume sit223-hd-monitoring_tls-public:/public:ro --entrypoint /bin/cat "%MONITOR_TLS_IMAGE%" /public/ca.crt > reports/monitoring/monitoring-ca.crt
+'''
+    bat '''@echo off
+docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network none --read-only --cap-drop ALL --volume sit223-hd-monitoring_tls-public:/public:ro --entrypoint /bin/cat "%MONITOR_TLS_IMAGE%" /public/tls-info.json > reports/monitoring/tls-info.json
+'''
+    bat '''@echo off
+docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network none --read-only --tmpfs /tmp --cap-drop ALL --volume "%WORKSPACE%/monitoring:/etc/prometheus:ro" --volume sit223-hd-monitoring_tls-public:/etc/monitoring/ca:ro --entrypoint /bin/promtool "%PROMETHEUS_IMAGE%" check config /etc/prometheus/prometheus.yml > reports/monitoring/prometheus-config-check.txt 2>&1
 '''
     bat '''@echo off
 docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network none --read-only --tmpfs /tmp --cap-drop ALL --volume "%WORKSPACE%/monitoring:/etc/prometheus:ro" --entrypoint /bin/promtool "%PROMETHEUS_IMAGE%" test rules /etc/prometheus/alerts.test.yml > reports/monitoring/alert-rule-tests.txt 2>&1
@@ -58,10 +75,11 @@ docker run --rm --name "%MONITOR_CONFIG_CONTAINER%" --network none --user 0:0 --
     bat '''@echo off
 docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network none --read-only --tmpfs /tmp --cap-drop ALL --volume sit223-hd-monitoring_private-config:/etc/alertmanager/private:ro --entrypoint /bin/amtool "%ALERTMANAGER_IMAGE%" check-config /etc/alertmanager/private/alertmanager.yml > reports/monitoring/alertmanager-config-check.txt 2>&1
 '''
-    // Recreate services so that changes to files and SMTP settings take effect on every successful run.
+    // Compose waits for running containers; the following verified-HTTPS checker gates actual readiness.
+    // Recreate services so certificates, configuration and SMTP settings take effect.
     bat 'docker compose --project-name %MONITORING_PROJECT% --file compose.monitoring.yaml up -d --no-build --pull never --force-recreate --wait --wait-timeout 120'
     bat '''@echo off
-docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network sit223-hd-monitoring_default --read-only --cap-drop ALL --security-opt no-new-privileges:true --volume "%WORKSPACE%/scripts:/checks:ro" "%APP_IMAGE_ID%" node /checks/check-monitoring.mjs ready > reports/monitoring/monitoring-ready.json
+docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network sit223-hd-monitoring_default --env NODE_EXTRA_CA_CERTS=/certs/ca.crt --volume sit223-hd-monitoring_tls-public:/certs:ro --read-only --cap-drop ALL --security-opt no-new-privileges:true --volume "%WORKSPACE%/scripts:/checks:ro" "%APP_IMAGE_ID%" node /checks/check-monitoring.mjs ready > reports/monitoring/monitoring-ready.json
 '''
     if (params.VERIFY_MONITORING_ALERT) {
         powershell '''
@@ -79,7 +97,7 @@ if ($health.status -ne 'ok' -or $health.environment -ne 'production' -or $health
             writeFile file: 'reports/monitoring/email-result.txt', text: 'Email delivery: IN_PROGRESS\nReal production outage demonstration requested.\n'
             bat 'docker stop --time 10 %PRODUCTION_CONTAINER%'
             bat '''@echo off
-docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network sit223-hd-monitoring_default --read-only --cap-drop ALL --security-opt no-new-privileges:true --volume "%WORKSPACE%/scripts:/checks:ro" --volume "%WORKSPACE%/reports/monitoring:/reports:ro" "%APP_IMAGE_ID%" node /checks/check-monitoring.mjs firing > reports/monitoring/alert-firing.json
+docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network sit223-hd-monitoring_default --env NODE_EXTRA_CA_CERTS=/certs/ca.crt --volume sit223-hd-monitoring_tls-public:/certs:ro --read-only --cap-drop ALL --security-opt no-new-privileges:true --volume "%WORKSPACE%/scripts:/checks:ro" --volume "%WORKSPACE%/reports/monitoring:/reports:ro" "%APP_IMAGE_ID%" node /checks/check-monitoring.mjs firing > reports/monitoring/alert-firing.json
 '''
         } finally {
             // Recovery also runs after a failed SMTP attempt or failed monitoring check.
@@ -106,12 +124,12 @@ throw 'Production did not become healthy within 90 seconds. Inspect Docker Deskt
             }
         }
         bat '''@echo off
-docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network sit223-hd-monitoring_default --read-only --cap-drop ALL --security-opt no-new-privileges:true --volume "%WORKSPACE%/scripts:/checks:ro" --volume "%WORKSPACE%/reports/monitoring:/reports:ro" "%APP_IMAGE_ID%" node /checks/check-monitoring.mjs resolved > reports/monitoring/alert-resolved.json
+docker run --rm --name "%MONITOR_TOOL_CONTAINER%" --network sit223-hd-monitoring_default --env NODE_EXTRA_CA_CERTS=/certs/ca.crt --volume sit223-hd-monitoring_tls-public:/certs:ro --read-only --cap-drop ALL --security-opt no-new-privileges:true --volume "%WORKSPACE%/scripts:/checks:ro" --volume "%WORKSPACE%/reports/monitoring:/reports:ro" "%APP_IMAGE_ID%" node /checks/check-monitoring.mjs resolved > reports/monitoring/alert-resolved.json
 '''
         writeFile file: 'reports/monitoring/email-result.txt', text: 'Email delivery: SMTP_ACCEPTED\nA real TaskboardDown alert fired and resolved. Alertmanager recorded a successful email request in each phase.\nConfirm both FIRING and RESOLVED messages arrived in the receiver mailbox; SMTP acceptance alone does not prove inbox delivery.\n'
     }
     writeFile file: 'reports/monitoring/monitoring-result.txt', text: "Monitoring: PASSED\nLive production target, alert rules, Alertmanager connection, Grafana dashboard and datasource passed.\nEmail demonstration: ${params.VERIFY_MONITORING_ALERT ? 'SMTP_ACCEPTED: verify mailbox receipt' : 'NOT_TESTED: enable VERIFY_MONITORING_ALERT for the demonstration'}\n"
-    echo 'Monitoring is ready: Grafana http://localhost:3003, Prometheus http://localhost:9090, Alertmanager http://localhost:9093.'
+    echo 'Monitoring is ready: Grafana https://localhost:3003, Prometheus https://localhost:9090, Alertmanager https://localhost:9093.'
 } catch (failure) {
     writeFile file: 'reports/monitoring/monitoring-result.txt', text: "Monitoring: FAILED\nReason: ${failure.message}\nInspect the individual checks, email-result.txt and production-recovery.txt if present.\n"
     if (params.VERIFY_MONITORING_ALERT) {

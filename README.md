@@ -16,7 +16,7 @@ Requirements already checked on your computer: Node.js 24.11.0, Git, Docker Desk
 npm test
 ```
 
-The Linux/Docker test suite contains **59 tests**: 37 application tests, six deployment/release tests and 16 monitoring tests. Direct Windows `npm test` skips one Linux file-permission test; the Jenkins Docker test target runs all 59. Node.js 24.11 may print an experimental warning for its built-in SQLite module; the test exit status and final summary determine the result. No third-party npm packages are required by this application.
+The Linux/Docker test suite contains **66 tests**: 37 application tests, six deployment/release tests and 23 monitoring/TLS tests. Direct Windows `npm test` skips one Linux file-permission test; the Jenkins Docker test target runs all 66. Node.js 24.11 may print an experimental warning for its built-in SQLite module; the test exit status and final summary determine the result. No third-party npm packages are required by this application. Running the tests directly also requires OpenSSL on PATH to generate temporary TLS certificates. The Jenkins Docker test target installs OpenSSL automatically; the deployed app image does not include it.
 
 4. Build and start the development container:
 
@@ -71,7 +71,7 @@ The application uses Node.js 24 and its built-in HTTP server, SQLite module and 
 | `src/validation.js` | Validation of task fields, dates, IDs and filters. |
 | `src/metrics.js` | Prometheus text-format metrics with fixed route labels. |
 | `public/` | Browser interface. |
-| `test/` | 59 automated application, deployment/release and monitoring tests. |
+| `test/` | 66 automated application, deployment/release and monitoring tests. |
 | `scripts/ci-report.js` | Runs tests with coverage thresholds and writes JUnit and LCOV reports. |
 | `scripts/healthcheck.js` | Checks that the running application and database are ready. |
 | `scripts/smoke-deploy.mjs` | Checks a deployed app's identity, browser assets, task operations and metrics; cleans up its temporary task. |
@@ -83,6 +83,7 @@ The application uses Node.js 24 and its built-in HTTP server, SQLite module and 
 | `ci/monitoring.groovy` | Monitoring setup, live verification and optional real outage/recovery email demonstration. |
 | `compose.monitoring.yaml`, `monitoring/` | Pinned monitoring services, scrape configuration, alert rules/tests and provisioned dashboard. |
 | `scripts/configure-monitoring.mjs` | Validates SMTP settings and installs configuration into a private Docker volume. |
+| `scripts/configure-monitoring-tls.mjs` | Generates the local CA and separate monitoring server certificates in private Docker volumes. |
 | `scripts/check-monitoring.mjs` | Checks monitoring APIs and verifies SMTP acceptance for firing/resolved alerts. |
 | `sonar-project.properties` | SonarQube Cloud project identifiers, source scope, coverage import, and quality-gate settings. |
 | `ci/secrets-report.tpl` | Produces a secret-scan report containing locations and rule details without secret values or source snippets. |
@@ -141,7 +142,7 @@ This Jenkinsfile defines seven assessed stages:
 
 Each runtime image has `APP_VERSION` set to its build identifier. The app displays that value and exposes it through `/health` and `/api/info` so a later deployment can be matched to the build that produced it.
 
-This pipeline uses Windows `bat` steps and PowerShell host-health requests, while its containers run Linux. Build #4 failed Security on image findings. Build #5 verified the smaller runtime and passed all four stages then implemented. Builds #6 and #7 passed the expanded 42-test suite, SonarQube and Security; #6 deployed staging successfully, and #7 deliberately failed Deploy and restored build #6. Build #8 passed the 43 tests then present and all six stages, including production release. Build #9 demonstrated production rollback. Build #11 passed the 54 tests then present but failed the SonarQube gate before monitoring could run. The checker fixes and expanded 59-test suite need a new Windows Jenkins run to verify that gate and the seventh stage. The pipeline timeout is 45 minutes; Deploy and Release each have five-minute limits, and Monitoring and Alerting has a 15-minute limit. Concurrent runs of this job are disabled. Use one Jenkins job targeting `*/main` for these fixed staging and production environments.
+This pipeline uses Windows `bat` steps and PowerShell host-health requests, while its containers run Linux. Build #4 failed Security on image findings. Build #5 verified the smaller runtime and passed all four stages then implemented. Builds #6 and #7 passed the expanded 42-test suite, SonarQube and Security; #6 deployed staging successfully, and #7 deliberately failed Deploy and restored build #6. Build #8 passed the 43 tests then present and all six stages, including production release. Build #9 demonstrated production rollback. Build #11 passed the 54 tests then present but failed the SonarQube gate before monitoring could run. Build #12 passed 59 tests and improved the security rating from C to B, but six low-severity HTTP/log-output findings still blocked Code Quality. The HTTPS and report-output changes and expanded 66-test suite need a new Windows Jenkins run to verify the gate and seventh stage. The pipeline timeout is 45 minutes; Deploy and Release each have five-minute limits, and Monitoring and Alerting has a 15-minute limit. Concurrent runs of this job are disabled. Use one Jenkins job targeting `*/main` for these fixed staging and production environments.
 
 ## Configure SonarQube Cloud
 
@@ -254,7 +255,7 @@ The staging service runs as the image's non-root user, has a read-only root file
 
 1. Review and merge the Deploy pull request into `main`. Keep Docker Desktop running and ensure port 3001 is available.
 2. Run the existing Jenkins job. If **Build with Parameters** is shown, leave both rollback options unchecked for a normal deployment and release. The first run after merging may still show **Build Now** until Jenkins loads the parameter definitions.
-3. Confirm all 59 tests and both gates pass, followed by the fifth stage, **Deploy**. Compose waits up to 90 seconds for the image's health check; startup failure or timeout blocks the stage. After Deploy succeeds, Release runs automatically.
+3. Confirm all 66 tests and both gates pass, followed by the fifth stage, **Deploy**. Compose waits up to 90 seconds for the image's health check; startup failure or timeout blocks the stage. After Deploy succeeds, Release runs automatically.
 4. Open `http://localhost:3001` on the Jenkins computer. The page should identify the environment as `staging` and show the current `build-N` version. Open `/health` to confirm those values and `status: ok`.
 5. Create a task manually and refresh the page. After another normal Jenkins deployment, confirm that task is still there. The named volume is reused; the pipeline's smoke checks delete only the temporary task they create.
 6. Save the pipeline screenshot, staging page and the build's **Artifacts > reports > deploy** files. The archive page can download that directory as a ZIP.
@@ -300,7 +301,7 @@ The app continues to display `build-N`; the archived release manifest links that
 
 1. Use the merged pipeline on `main`. Keep Docker Desktop running and ensure port 3002 is available. Configure the monitoring email credential and parameters below before a complete seven-stage run.
 2. Open the existing Jenkins job's **Build with Parameters**. Leave **VERIFY_STAGING_ROLLBACK** unchecked, and leave **VERIFY_PRODUCTION_ROLLBACK** unchecked if it is already shown. The new parameter may appear only after Jenkins first loads the updated Jenkinsfile.
-3. Run the complete pipeline. Confirm 59 tests and all seven assessed stages pass. The automatic **Checkout SCM** step does not count as an assessed stage.
+3. Run the complete pipeline. Confirm 66 tests and all seven assessed stages pass. The automatic **Checkout SCM** step does not count as an assessed stage.
 4. Open `http://localhost:3001` and `http://localhost:3002`. Both should show the current `build-N`, with `staging` and `production` respectively. `/health` on port 3002 must return `status: ok`, the current version and `environment: production`.
 5. Production initially has its own empty task list. Create a task called `Production check`, refresh the page and confirm it remains. Confirm it does not appear in staging, and that the earlier staging task still exists there. After another successful release, confirm the production task remains too.
 6. Save the complete pipeline screenshot, both browser pages, and **Build Artifacts > reports > release**. Read `release-result.txt` and `release-manifest.txt`; compare the image ID with `reports/security/scan-context.txt`, `reports/deploy/deployment-result.txt` and `promoted-from-staging.json`.
@@ -333,11 +334,27 @@ The seventh stage deploys `prom/prometheus:v3.13.3`, `prom/alertmanager:v0.34.1`
 
 | Service | Local URL | Storage |
 | --- | --- | --- |
-| Grafana dashboard | `http://localhost:3003/d/taskboard-production` | `sit223-hd-monitoring_grafana-data` |
-| Prometheus targets and alerts | `http://localhost:9090/targets`, `/alerts` | `sit223-hd-monitoring_prometheus-data` |
-| Alertmanager alerts | `http://localhost:9093` | `sit223-hd-monitoring_alertmanager-data` |
+| Grafana dashboard | `https://localhost:3003/d/taskboard-production` | `sit223-hd-monitoring_grafana-data` |
+| Prometheus targets and alerts | `https://localhost:9090/targets`, `/alerts` | `sit223-hd-monitoring_prometheus-data` |
+| Alertmanager alerts | `https://localhost:9093` | `sit223-hd-monitoring_alertmanager-data` |
 
 All ports bind to localhost. Grafana allows anonymous **Viewer** access, disables login and sign-up, and creates no default admin account. This is a local coursework dashboard. Prometheus retains up to seven days or 512 MB of time-series blocks. All three services retain state in separate volumes, restart unless explicitly stopped, and use bounded Docker logs. Re-running the stage recreates the monitoring containers to apply the checked-in configuration while retaining their data. Brief gaps and reset process counters can occur during recreation.
+
+### Monitoring HTTPS and certificate trust
+
+Jenkins builds a separate `monitoring-tls` tool target containing OpenSSL, then runs it without network access. It creates a local CA in `sit223-hd-monitoring_tls-authority` and issues a different server key/certificate for each monitoring service. The CA signing key is never mounted into a running service. Each service receives only its own key volume; private keys have mode 0600 and the pinned service's UID (65534 for Prometheus/Alertmanager, 472 for Grafana). Only the public CA and certificate metadata are archived.
+
+Prometheus's web API, Alertmanager's web API, Grafana, Prometheus-to-Alertmanager delivery, monitoring self-scrapes and Grafana's datasource use HTTPS. Prometheus reads the public CA through `tls_config.ca_file`, Grafana uses `SSL_CERT_FILE`, and the Node checker uses `NODE_EXTRA_CA_CERTS`. The app's production scrape still uses HTTP on its existing private Docker network; these changes secure the monitoring services, not the Taskboard HTTP listener.
+
+The CA persists across builds and is valid for ten years. Server certificates are valid for 30 days and renewed whenever the monitoring stage runs; rerun the pipeline before they expire. An incomplete, mismatched or nearly expired CA fails setup instead of silently replacing the trusted identity. Keep the private TLS volumes for future runs.
+
+Jenkins's checks trust this CA automatically. To open the monitoring dashboards in your Windows browser without a certificate warning:
+
+1. After the monitoring stage runs, download **Build Artifacts > reports > monitoring > monitoring-ca.crt** and `tls-info.json` from your Jenkins instance into the same folder.
+2. In PowerShell in that folder, compare `(Get-FileHash .\monitoring-ca.crt -Algorithm SHA256).Hash` with the `caFileSha256` value in `tls-info.json` (case does not matter).
+3. Import this project's CA for your Windows user with `certutil -user -addstore Root .\monitoring-ca.crt`, then restart the browser and use the HTTPS URLs above. This grants trust to certificates issued by this local CA; import only the certificate produced by your own Jenkins run.
+
+This browser step is separate from the automated checks and does not require changing Jenkins's Windows certificate store. No private key needs to be downloaded or imported.
 
 ### Configure the email receiver
 
@@ -356,7 +373,7 @@ All ports bind to localhost. Grafana allows anonymous **Viewer** access, disable
 
 Supply the receiver parameters whenever starting a build; the checked-in defaults do not contain your email address. A temporary container validates these settings and writes Alertmanager configuration plus a mode-0400 password file into `sit223-hd-monitoring_private-config`. It runs without network access, inherits the credential by environment-variable name and is removed afterward. The persistent Alertmanager container reads the private volume without receiving the password in its environment. The password is not written to Git, the Jenkins workspace or archived reports. Docker administrators can access this volume; keep it for monitoring restarts, and rotate credentials in Jenkins then rerun the stage when necessary. Do not attach its contents to evidence or delete it while Alertmanager needs it.
 
-The stage runs the pinned `promtool` configuration validator and **six alert-rule test scenarios**, then validates the generated Alertmanager configuration with `amtool`. It checks a fresh production scrape, all three healthy rules, Prometheus's Alertmanager connection, Grafana's dashboard and an actual datasource query. Any failed check fails the stage. A normal green run records `Email delivery: NOT_TESTED`; it verifies monitoring readiness without claiming that an email was delivered.
+Compose waits for the monitoring containers to run; the Node checker then establishes readiness through verified HTTPS requests. The stage runs the pinned `promtool` configuration validator and **six alert-rule test scenarios**, then validates the generated Alertmanager configuration with `amtool`. It checks a fresh production scrape, all three healthy rules, Prometheus's Alertmanager connection, Grafana's dashboard and an actual datasource query. Any failed check fails the stage. A normal green run records `Email delivery: NOT_TESTED`; it verifies monitoring readiness without claiming that an email was delivered.
 
 ### Alert policy
 
@@ -379,11 +396,12 @@ Alertmanager groups by alert name and environment, waits 10 seconds before a gro
 
 The checker compares completed SMTP requests minus failed requests before and after each phase, requires two consecutive observations, and rejects an Alertmanager restart during the demonstration. It confirms **SMTP acceptance**, not final inbox placement. Only actual received emails establish receiver delivery. No simulated alert is submitted to manufacture a passing result.
 
-The checker CLI accepts exactly one phase argument: `ready`, `firing` or `resolved`. It reads the firing baseline only from `/reports/monitoring-ready.json` and the recovery baseline only from `/reports/alert-firing.json`, supplied through Jenkins's read-only report mount. Callers cannot supply a file path. Metric labels are parsed with a forward-only cursor instead of a backtracking regular expression; malformed labels and unusable counter values fail the check.
+The checker CLI accepts exactly one phase argument: `ready`, `firing` or `resolved`. It reads the firing baseline only from `/reports/monitoring-ready.json` and the recovery baseline only from `/reports/alert-firing.json`, supplied through Jenkins's read-only report mount. Callers cannot supply a file path. HTTPS is required for every monitoring API; certificate validation stays enabled and redirects are rejected. Reports use one JSON record per line, with control characters and Unicode line separators escaped before console output. Metric labels are parsed with a forward-only cursor instead of a backtracking regular expression; malformed labels and unusable counter values fail the check.
 
 | Monitoring artifact | Purpose |
 | --- | --- |
 | `monitoring-context.txt`, `monitor-images.json`, `compose-resolved.yaml` | Build/commit/image context and deployed monitoring configuration |
+| `monitoring-ca.crt`, `tls-info.json`, `tls-tool-image.json` | Public local CA certificate, fingerprints/expiry dates and provisioning image identity; no private keys |
 | `prometheus-config-check.txt`, `alert-rule-tests.txt`, `alertmanager-config-check.txt` | Real pinned-tool configuration/rule validation results |
 | `monitoring-ready.json`, `monitoring-result.txt` | Live API checks and overall stage result |
 | `email-result.txt` | `NOT_TESTED`, `SMTP_ACCEPTED`, or failed/unverified demonstration outcome |
@@ -397,7 +415,7 @@ An invalid mail credential, rejected SMTP authentication or blocked outbound por
 
 A hard Jenkins timeout, agent loss or Docker shutdown can interrupt recovery. If production remains stopped, run `docker start sit223-hd-production`, wait for its Docker health check, then open `http://localhost:3002/health` and inspect the latest reports. This restarts the existing container and preserves its data. Do not delete the production database volume as a recovery step.
 
-Monitoring shares the same Windows machine and Docker engine as the app. It can detect an app/container outage while that engine is running; it cannot email about failure of its own host, Docker engine, Prometheus or Alertmanager. A separate external monitor and a durable external deployment would be needed for that failure scope. The Security stage scans the Taskboard runtime and source; it does not scan the three monitoring images. Their pinned versions/metadata are evidence of identity, not proof that they contain no vulnerabilities.
+Monitoring shares the same Windows machine and Docker engine as the app. It can detect an app/container outage while that engine is running; it cannot email about failure of its own host, Docker engine, Prometheus or Alertmanager. A separate external monitor and a durable external deployment would be needed for that failure scope. The Security stage scans the Taskboard runtime and source; it does not scan the three monitoring images or the temporary TLS provisioning image. Their pinned versions/metadata are evidence of identity, not proof that they contain no vulnerabilities.
 
 ## Assessment evidence to collect as we progress
 
@@ -427,11 +445,20 @@ The initial monitoring change expanded the suite to 54 tests. Local Node.js 24.1
 
 Windows Jenkins build #11 checked out `7b262d2ac3d0a2973d9cdfed8c32e4e773f8281d`, passed those 54 tests and uploaded the SonarQube analysis with coverage. The quality gate failed because Security Rating on New Code was C rather than the required A. The supplied SonarQube screenshot identified a high-severity path-traversal finding and a medium-severity regex-performance finding in `scripts/check-monitoring.mjs`. Security, Deploy, Release and Monitoring and Alerting were skipped, so this run did not test Gmail delivery.
 
-The checker fix removes file-path CLI input, uses fixed baseline report paths and replaces the label regex with a linear parser. Five regression tests cover exact metric selection, malformed input, 200,000-character labels, fixed report selection and rejected relative/absolute CLI paths. The normal HTTP fixture deadline is five seconds to allow two observations during concurrent coverage runs; production deadlines are unchanged. All 59 tests passed locally on Node.js 24.19.0, with 99.72% lines, 98.66% branches and 100% functions across the seven scoped files. JUnit contains 59 cases with no failures or errors, and all seven LCOV paths resolve. A fresh Windows Jenkins run and SonarQube analysis are still required to confirm that the findings clear and the quality gate passes.
+The checker fix removes file-path CLI input, uses fixed baseline report paths and replaces the label regex with a linear parser. Five regression tests cover exact metric selection, malformed input, 200,000-character labels, fixed report selection and rejected relative/absolute CLI paths. The normal HTTP fixture deadline is five seconds to allow two observations during concurrent coverage runs; production deadlines are unchanged. All 59 tests passed locally on Node.js 24.19.0, with 99.72% lines, 98.66% branches and 100% functions across the seven scoped files. JUnit contains 59 cases with no failures or errors, and all seven LCOV paths resolve. Windows Jenkins build #12 subsequently passed those 59 tests at `a19121da99b749068e091ddab9470f94665a939f`. SonarQube reported no top issues, but its security rating remained B rather than A: four low-severity HTTP findings and two low-severity log-injection findings remained in the checker. The gate blocked all later stages.
 
-Docker, Jenkins, Windows PowerShell, Prometheus, Alertmanager and Grafana are unavailable in the preparation environment. The checked-in `promtool` scenarios and Windows monitoring orchestration must run on the user's machine; they have not been executed here. Local fixtures simulate the service API responses and do not send email. Real service startup, dashboard rendering, the deliberate outage/recovery and actual received emails remain required for the seventh stage's evidence.
+The HTTPS/report-output change adds seven regression tests. All 66 tests passed locally on Node.js 24.19.0 with OpenSSL 3.0.13: 99.52% lines, 98.00% branches and 100% functions across eight scoped source files. Tests generate real certificates, preserve the CA across renewals, check service names/private-file permissions, reject malformed CA state, exercise real HTTPS requests, reject untrusted certificates and redirects, and preserve diagnostic data while escaping log-injection payloads. JUnit contains 66 cases without failures or errors; all eight LCOV paths resolve. Compose/YAML parsing and static checks confirm the HTTPS settings and public-CA mounts.
+
+Docker, Jenkins, Windows PowerShell, Prometheus, Alertmanager and Grafana are unavailable in the preparation environment. Its restricted UID map also prevents assigning files to UID 65534, so service-key ownership must be verified in Docker. The checked-in `promtool` scenarios and Windows monitoring orchestration must run on the user's machine; they have not been executed here. Local fixtures simulate the service API responses and do not send email. A fresh SonarQube scan, real service startup, dashboard rendering, the deliberate outage/recovery and actual received emails remain required for the seventh stage's evidence.
 
 ## Technical references
+
+- [Prometheus HTTPS configuration](https://prometheus.io/docs/prometheus/latest/configuration/https/)
+- [Alertmanager HTTPS configuration](https://prometheus.io/docs/alerting/latest/https/)
+- [Grafana HTTPS setup](https://grafana.com/docs/grafana/latest/setup-grafana/set-up-https/)
+- [Go system CA certificate file handling](https://github.com/golang/go/blob/go1.26.6/src/crypto/x509/root_unix.go)
+- [Node.js extra CA certificates](https://nodejs.org/docs/latest-v24.x/api/cli.html#node_extra_ca_certsfile)
+- [Windows certutil certificate-store commands](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/certutil)
 
 - [Node.js test runner](https://nodejs.org/docs/latest-v24.x/api/test.html)
 - [Node.js SQLite module](https://nodejs.org/api/sqlite.html)

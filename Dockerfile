@@ -28,7 +28,14 @@ ENV NODE_ENV=production \
     APP_ENV=development \
     APP_VERSION=${APP_VERSION}
 
-FROM base AS test
+FROM base AS monitoring-tools
+RUN apk add --no-cache openssl
+COPY scripts/configure-monitoring-tls.mjs ./scripts/
+
+FROM monitoring-tools AS monitoring-tls
+ENTRYPOINT ["node", "/app/scripts/configure-monitoring-tls.mjs"]
+
+FROM monitoring-tools AS test
 RUN mkdir -p /app/reports && chown node:node /app/reports
 COPY test ./test
 COPY scripts/ci-report.js ./scripts/ci-report.js

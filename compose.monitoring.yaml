@@ -8,20 +8,18 @@ services:
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=7d
       - --storage.tsdb.retention.size=512MB
-      - --web.external-url=http://localhost:9090
+      - --web.external-url=https://localhost:9090
+      - --web.config.file=/etc/prometheus/web.yml
     ports:
       - "127.0.0.1:9090:9090"
     volumes:
       - ./monitoring:/etc/prometheus:ro
       - prometheus-data:/prometheus
+      - tls-prometheus:/etc/monitoring/tls:ro
+      - tls-public:/etc/monitoring/ca:ro
     networks:
       - default
       - production
-    healthcheck:
-      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:9090/-/ready]
-      interval: 5s
-      timeout: 3s
-      retries: 12
     restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
@@ -37,18 +35,16 @@ services:
       - --config.file=/etc/alertmanager/private/alertmanager.yml
       - --storage.path=/alertmanager
       - --cluster.listen-address=
-      - --web.external-url=http://localhost:9093
+      - --web.external-url=https://localhost:9093
+      - --web.config.file=/etc/monitoring/web.yml
       - --enable-feature=receiver-name-in-metrics
     ports:
       - "127.0.0.1:9093:9093"
     volumes:
       - private-config:/etc/alertmanager/private:ro
       - alertmanager-data:/alertmanager
-    healthcheck:
-      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:9093/-/ready]
-      interval: 5s
-      timeout: 3s
-      retries: 12
+      - ./monitoring/web.yml:/etc/monitoring/web.yml:ro
+      - tls-alertmanager:/etc/monitoring/tls:ro
     restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
@@ -63,6 +59,13 @@ services:
     ports:
       - "127.0.0.1:3003:3000"
     environment:
+      GF_SERVER_PROTOCOL: https
+      GF_SERVER_ROOT_URL: https://localhost:3003
+      GF_SERVER_CERT_FILE: /etc/monitoring/tls/server.crt
+      GF_SERVER_CERT_KEY: /etc/monitoring/tls/server.key
+      GF_SERVER_MIN_TLS_VERSION: TLS1.2
+      GF_SECURITY_COOKIE_SECURE: "true"
+      SSL_CERT_FILE: /etc/monitoring/ca/ca.crt
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_AUTH_BASIC_ENABLED: "false"
@@ -76,6 +79,8 @@ services:
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/taskboard.json
     volumes:
       - grafana-data:/var/lib/grafana
+      - tls-grafana:/etc/monitoring/tls:ro
+      - tls-public:/etc/monitoring/ca:ro
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     restart: unless-stopped
@@ -97,3 +102,15 @@ volumes:
   private-config:
     external: true
     name: sit223-hd-monitoring_private-config
+  tls-public:
+    external: true
+    name: sit223-hd-monitoring_tls-public
+  tls-prometheus:
+    external: true
+    name: sit223-hd-monitoring_tls-prometheus
+  tls-alertmanager:
+    external: true
+    name: sit223-hd-monitoring_tls-alertmanager
+  tls-grafana:
+    external: true
+    name: sit223-hd-monitoring_tls-grafana
