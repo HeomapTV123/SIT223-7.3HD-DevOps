@@ -4,9 +4,9 @@ import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { emailConfiguration, installEmailConfiguration } from '../scripts/configure-monitoring.mjs';
-import { metricSum, monitoringSnapshot, phaseSatisfied, waitForMonitoring } from '../scripts/check-monitoring.mjs';
+import { metricSum, monitoringCommand, monitoringSnapshot, phaseSatisfied, waitForMonitoring } from '../scripts/check-monitoring.mjs';
 
 const emailEnv = () => ({ SMTP_SMARTHOST: 'smtp.example.org:587', SMTP_USERNAME: 'sender@example.org',
   SMTP_PASSWORD: 'test-only-placeholder', SMTP_FROM: '', ALERT_EMAIL_TO: 'receiver@example.org' });
@@ -88,7 +88,7 @@ async function fixture(t) {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); });
   const url = `http://127.0.0.1:${server.address().port}`;
-  return { state, options: { prometheusUrl: url, alertmanagerUrl: url, grafanaUrl: url, timeoutMs: 100, intervalMs: 1 } };
+  return { state, options: { prometheusUrl: url, alertmanagerUrl: url, grafanaUrl: url, timeoutMs: 5000, intervalMs: 1 } };
 }
 
 test('monitoring checks real HTTP APIs, production metrics, dashboard and datasource before passing', async (t) => {
@@ -166,6 +166,69 @@ test('invalid metrics and missing baselines cannot be used as email proof', asyn
   assert.equal(metricSum('counter{label="a\\\"b"} 2\nother 10', 'counter', { label: 'a"b' }), 2);
 });
 
+test('counter parsing preserves exact names, receiver filtering and Prometheus label escapes', () => {
+  const metrics = [
+    '# HELP counter_total Completed requests.',
+    '  counter_total{receiver_name="availability-email", integration = "email",} 2e0 1234',
+    '\tcounter_total{integration="email",receiver_name="availability-email"}\t+3\r',
+    'counter_total{integration="email",receiver_name="production-email"} 100',
+    'counter_total_extra{integration="email",receiver_name="availability-email"} 1000',
+  ].join('\n');
+  assert.equal(metricSum(metrics, 'counter_total', { integration: 'email', receiver_name: 'availability-email' }), 5);
+  assert.equal(metricSum('counter{} .5\ncounter{ } 1.5\ncounter 2', 'counter'), 4);
+  const escaped = String.raw`counter{label="comma,brace}equals=quote\"backslash\\newline\n"} 7`;
+  assert.equal(metricSum(escaped, 'counter', { label: 'comma,brace}equals=quote"backslash\\newline\n' }), 7);
+});
+
+test('malformed labels and unusable counter values fail closed', () => {
+  const malformed = [
+    'counter', 'counter ', 'counter{', 'counter{a}', 'counter{bad-name="b"} 1',
+    'counter{a="b",a="c"} 1', 'counter{a=unquoted} 1', 'counter{a="unterminated',
+    String.raw`counter{a="invalid\t"} 1`, 'counter{a="backslash' + '\\',
+    'counter{a="b";c="d"} 1', 'counter{a="b",', 'counter{a="b"}1',
+    'counter NaN', 'counter +Inf', 'counter -1', 'counter 0x10', 'counter 1e',
+    'counter 1e309', 'counter 1e308\ncounter 1e308',
+  ];
+  for (const input of malformed) assert.throws(() => metricSum(input, 'counter'), /Invalid|Unterminated/);
+});
+
+test('long invalid labels complete without regex backtracking', () => {
+  // A child process timeout also stops a regression that blocks the JavaScript event loop.
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { metricSum } from './scripts/check-monitoring.mjs';
+    const long = 'a'.repeat(200000);
+    assert.throws(() => metricSum('counter{' + long + '} 1', 'counter'), /Invalid/);
+    assert.throws(() => metricSum('counter{label="' + long, 'counter'), /Unterminated/);
+    assert.equal(metricSum('counter{label="' + long + '"} 1', 'counter', { label: long }), 1);
+  `], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(result.status, 0, result.error?.message || result.stderr);
+});
+
+test('monitoring phases read only their fixed baseline reports and validate arguments before file access', () => {
+  const ready = { email: { succeeded: 0, startedAt: 12345 } };
+  const firing = { email: { succeeded: 1, startedAt: 12345 } };
+  const reports = new Map([
+    ['/reports/monitoring-ready.json', ready], ['/reports/alert-firing.json', firing],
+  ]);
+  const reads = [];
+  const readReport = (path, encoding) => {
+    reads.push(path);
+    assert.equal(encoding, 'utf8');
+    assert.ok(reports.has(path));
+    return JSON.stringify(reports.get(path));
+  };
+  for (const args of [[], ['unknown'], ['../secret.json'], ['firing', '../../secret.json'], ['resolved', '/tmp/secret.json']]) {
+    assert.throws(() => monitoringCommand(args, readReport), /one phase argument only/);
+  }
+  assert.deepEqual(monitoringCommand(['ready'], readReport), { phase: 'ready', baseline: undefined });
+  assert.equal(reads.length, 0);
+  assert.deepEqual(monitoringCommand(['firing'], readReport), { phase: 'firing', baseline: ready });
+  assert.deepEqual(monitoringCommand(['resolved'], readReport), { phase: 'resolved', baseline: firing });
+  assert.deepEqual(reads, [...reports.keys()]);
+  assert.throws(() => monitoringCommand(['firing'], () => '{invalid'), SyntaxError);
+});
+
 async function runNode(args, env = {}) {
   const child = spawn(process.execPath, args, { env: { ...process.env, ...env } });
   let stdout = '';
@@ -175,6 +238,17 @@ async function runNode(args, env = {}) {
   const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
   return { code, stdout, stderr };
 }
+
+test('monitoring CLI rejects relative and absolute report path arguments before reading any file', async () => {
+  for (const path of ['../../package.json', 'package.json', '/etc/passwd', 'C:\\Windows\\win.ini', '/reports/monitoring-ready.json']) {
+    const result = await runNode(['scripts/check-monitoring.mjs', 'firing', path]);
+    assert.equal(result.code, 1);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.status, 'FAILED');
+    assert.match(report.reason, /one phase argument only/);
+    assert.equal(report.reason.includes(path), false);
+  }
+});
 
 test('monitoring CLI emits usable JSON and returns a nonzero status for invalid execution', async (t) => {
   const { options } = await fixture(t);

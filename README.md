@@ -16,7 +16,7 @@ Requirements already checked on your computer: Node.js 24.11.0, Git, Docker Desk
 npm test
 ```
 
-The Linux/Docker test suite contains **54 tests**: 37 application tests, six deployment/release tests and 11 monitoring tests. Direct Windows `npm test` skips one Linux file-permission test; the Jenkins Docker test target runs all 54. Node.js 24.11 may print an experimental warning for its built-in SQLite module; the test exit status and final summary determine the result. No third-party npm packages are required by this application.
+The Linux/Docker test suite contains **59 tests**: 37 application tests, six deployment/release tests and 16 monitoring tests. Direct Windows `npm test` skips one Linux file-permission test; the Jenkins Docker test target runs all 59. Node.js 24.11 may print an experimental warning for its built-in SQLite module; the test exit status and final summary determine the result. No third-party npm packages are required by this application.
 
 4. Build and start the development container:
 
@@ -71,7 +71,7 @@ The application uses Node.js 24 and its built-in HTTP server, SQLite module and 
 | `src/validation.js` | Validation of task fields, dates, IDs and filters. |
 | `src/metrics.js` | Prometheus text-format metrics with fixed route labels. |
 | `public/` | Browser interface. |
-| `test/` | 54 automated application, deployment/release and monitoring tests. |
+| `test/` | 59 automated application, deployment/release and monitoring tests. |
 | `scripts/ci-report.js` | Runs tests with coverage thresholds and writes JUnit and LCOV reports. |
 | `scripts/healthcheck.js` | Checks that the running application and database are ready. |
 | `scripts/smoke-deploy.mjs` | Checks a deployed app's identity, browser assets, task operations and metrics; cleans up its temporary task. |
@@ -141,7 +141,7 @@ This Jenkinsfile defines seven assessed stages:
 
 Each runtime image has `APP_VERSION` set to its build identifier. The app displays that value and exposes it through `/health` and `/api/info` so a later deployment can be matched to the build that produced it.
 
-This pipeline uses Windows `bat` steps and PowerShell host-health requests, while its containers run Linux. Build #4 failed Security on image findings. Build #5 verified the smaller runtime and passed all four stages then implemented. Builds #6 and #7 passed the expanded 42-test suite, SonarQube and Security; #6 deployed staging successfully, and #7 deliberately failed Deploy and restored build #6. Build #8 passed the 43 tests then present and all six stages, including production release. Build #9 demonstrated production rollback. The expanded 54-test suite and seventh stage need a new Windows Jenkins run. The pipeline timeout is 45 minutes; Deploy and Release each have five-minute limits, and Monitoring and Alerting has a 15-minute limit. Concurrent runs of this job are disabled. Use one Jenkins job targeting `*/main` for these fixed staging and production environments.
+This pipeline uses Windows `bat` steps and PowerShell host-health requests, while its containers run Linux. Build #4 failed Security on image findings. Build #5 verified the smaller runtime and passed all four stages then implemented. Builds #6 and #7 passed the expanded 42-test suite, SonarQube and Security; #6 deployed staging successfully, and #7 deliberately failed Deploy and restored build #6. Build #8 passed the 43 tests then present and all six stages, including production release. Build #9 demonstrated production rollback. Build #11 passed the 54 tests then present but failed the SonarQube gate before monitoring could run. The checker fixes and expanded 59-test suite need a new Windows Jenkins run to verify that gate and the seventh stage. The pipeline timeout is 45 minutes; Deploy and Release each have five-minute limits, and Monitoring and Alerting has a 15-minute limit. Concurrent runs of this job are disabled. Use one Jenkins job targeting `*/main` for these fixed staging and production environments.
 
 ## Configure SonarQube Cloud
 
@@ -254,7 +254,7 @@ The staging service runs as the image's non-root user, has a read-only root file
 
 1. Review and merge the Deploy pull request into `main`. Keep Docker Desktop running and ensure port 3001 is available.
 2. Run the existing Jenkins job. If **Build with Parameters** is shown, leave both rollback options unchecked for a normal deployment and release. The first run after merging may still show **Build Now** until Jenkins loads the parameter definitions.
-3. Confirm all 54 tests and both gates pass, followed by the fifth stage, **Deploy**. Compose waits up to 90 seconds for the image's health check; startup failure or timeout blocks the stage. After Deploy succeeds, Release runs automatically.
+3. Confirm all 59 tests and both gates pass, followed by the fifth stage, **Deploy**. Compose waits up to 90 seconds for the image's health check; startup failure or timeout blocks the stage. After Deploy succeeds, Release runs automatically.
 4. Open `http://localhost:3001` on the Jenkins computer. The page should identify the environment as `staging` and show the current `build-N` version. Open `/health` to confirm those values and `status: ok`.
 5. Create a task manually and refresh the page. After another normal Jenkins deployment, confirm that task is still there. The named volume is reused; the pipeline's smoke checks delete only the temporary task they create.
 6. Save the pipeline screenshot, staging page and the build's **Artifacts > reports > deploy** files. The archive page can download that directory as a ZIP.
@@ -300,7 +300,7 @@ The app continues to display `build-N`; the archived release manifest links that
 
 1. Use the merged pipeline on `main`. Keep Docker Desktop running and ensure port 3002 is available. Configure the monitoring email credential and parameters below before a complete seven-stage run.
 2. Open the existing Jenkins job's **Build with Parameters**. Leave **VERIFY_STAGING_ROLLBACK** unchecked, and leave **VERIFY_PRODUCTION_ROLLBACK** unchecked if it is already shown. The new parameter may appear only after Jenkins first loads the updated Jenkinsfile.
-3. Run the complete pipeline. Confirm 54 tests and all seven assessed stages pass. The automatic **Checkout SCM** step does not count as an assessed stage.
+3. Run the complete pipeline. Confirm 59 tests and all seven assessed stages pass. The automatic **Checkout SCM** step does not count as an assessed stage.
 4. Open `http://localhost:3001` and `http://localhost:3002`. Both should show the current `build-N`, with `staging` and `production` respectively. `/health` on port 3002 must return `status: ok`, the current version and `environment: production`.
 5. Production initially has its own empty task list. Create a task called `Production check`, refresh the page and confirm it remains. Confirm it does not appear in staging, and that the earlier staging task still exists there. After another successful release, confirm the production task remains too.
 6. Save the complete pipeline screenshot, both browser pages, and **Build Artifacts > reports > release**. Read `release-result.txt` and `release-manifest.txt`; compare the image ID with `reports/security/scan-context.txt`, `reports/deploy/deployment-result.txt` and `promoted-from-staging.json`.
@@ -379,6 +379,8 @@ Alertmanager groups by alert name and environment, waits 10 seconds before a gro
 
 The checker compares completed SMTP requests minus failed requests before and after each phase, requires two consecutive observations, and rejects an Alertmanager restart during the demonstration. It confirms **SMTP acceptance**, not final inbox placement. Only actual received emails establish receiver delivery. No simulated alert is submitted to manufacture a passing result.
 
+The checker CLI accepts exactly one phase argument: `ready`, `firing` or `resolved`. It reads the firing baseline only from `/reports/monitoring-ready.json` and the recovery baseline only from `/reports/alert-firing.json`, supplied through Jenkins's read-only report mount. Callers cannot supply a file path. Metric labels are parsed with a forward-only cursor instead of a backtracking regular expression; malformed labels and unusable counter values fail the check.
+
 | Monitoring artifact | Purpose |
 | --- | --- |
 | `monitoring-context.txt`, `monitor-images.json`, `compose-resolved.yaml` | Build/commit/image context and deployed monitoring configuration |
@@ -421,7 +423,11 @@ The Release change adds a test that runs the production smoke CLI against a real
 
 The user's Windows Jenkins build #8 passed the 43-test suite and all six stages then present. It released `build-8` with image `sha256:cbe75390d5e52a5a4f5ee8b83ad5147951d97ddb2ed672512ae862c6dcb60d4c`. Build #9 deliberately failed Release and restored that previous healthy image. The subsequent browser screenshot showed production `build-8` at port 3002 with the `Production check` task retained. This verifies production promotion and image rollback for those runs.
 
-The monitoring change expands the suite to 54 tests. Local Node.js 24.19.0 execution passed all 54 with no failures: 99.69% lines, 98.09% branches and 100% functions across the seven scoped source files. JUnit parses successfully, all seven LCOV paths resolve, and monitoring YAML/dashboard JSON parse. Monitoring tests exercise real local HTTP endpoints, rejected/malformed settings, private-file rotation, failed SMTP counter handling, pending/silenced alerts, fresh-data requirements, service failures, timeouts, restart detection and CLI exit/report behaviour.
+The initial monitoring change expanded the suite to 54 tests. Local Node.js 24.19.0 execution passed all 54 with no failures: 99.69% lines, 98.09% branches and 100% functions across the seven scoped source files. JUnit parsed successfully, all seven LCOV paths resolved, and monitoring YAML/dashboard JSON parsed. Monitoring tests exercise real local HTTP endpoints, rejected/malformed settings, private-file rotation, failed SMTP counter handling, pending/silenced alerts, fresh-data requirements, service failures, timeouts, restart detection and CLI exit/report behaviour.
+
+Windows Jenkins build #11 checked out `7b262d2ac3d0a2973d9cdfed8c32e4e773f8281d`, passed those 54 tests and uploaded the SonarQube analysis with coverage. The quality gate failed because Security Rating on New Code was C rather than the required A. The supplied SonarQube screenshot identified a high-severity path-traversal finding and a medium-severity regex-performance finding in `scripts/check-monitoring.mjs`. Security, Deploy, Release and Monitoring and Alerting were skipped, so this run did not test Gmail delivery.
+
+The checker fix removes file-path CLI input, uses fixed baseline report paths and replaces the label regex with a linear parser. Five regression tests cover exact metric selection, malformed input, 200,000-character labels, fixed report selection and rejected relative/absolute CLI paths. The normal HTTP fixture deadline is five seconds to allow two observations during concurrent coverage runs; production deadlines are unchanged. All 59 tests passed locally on Node.js 24.19.0, with 99.72% lines, 98.66% branches and 100% functions across the seven scoped files. JUnit contains 59 cases with no failures or errors, and all seven LCOV paths resolve. A fresh Windows Jenkins run and SonarQube analysis are still required to confirm that the findings clear and the quality gate passes.
 
 Docker, Jenkins, Windows PowerShell, Prometheus, Alertmanager and Grafana are unavailable in the preparation environment. The checked-in `promtool` scenarios and Windows monitoring orchestration must run on the user's machine; they have not been executed here. Local fixtures simulate the service API responses and do not send email. Real service startup, dashboard rendering, the deliberate outage/recovery and actual received emails remain required for the seventh stage's evidence.
 
