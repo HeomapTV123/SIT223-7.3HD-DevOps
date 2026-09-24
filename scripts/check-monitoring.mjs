@@ -1,0 +1,134 @@
+import { readFileSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
+import { pathToFileURL } from 'node:url';
+
+const productionJob = 'taskboard-production';
+const requiredRules = ['TaskboardDown', 'TaskboardHighErrorRate', 'TaskboardHighMemory'];
+const productionAlert = (alert) => alert.labels?.alertname === 'TaskboardDown'
+  && alert.labels?.environment === 'production';
+const metricLabels = { integration: 'email', receiver_name: 'availability-email' };
+
+export function metricSum(text, name, wanted = {}) {
+  let total = 0;
+  for (const line of text.split('\n')) {
+    const match = /^(\w+)(?:\{(.*)\})?\s+([\d.eE+-]+)(?:\s|$)/.exec(line);
+    if (!match || match[1] !== name) continue;
+    const labels = Object.fromEntries([...String(match[2] || '').matchAll(/(\w+)=("(?:[^"\\]|\\.)*")/g)]
+      .map((pair) => [pair[1], JSON.parse(pair[2])]));
+    if (!Object.entries(wanted).every(([key, value]) => labels[key] === value)) continue;
+    const value = Number(match[3]);
+    if (!Number.isFinite(value) || value < 0) throw new Error(`Invalid ${name} metric.`);
+    total += value;
+  }
+  return total;
+}
+
+function queryValue(response) {
+  const result = response?.data?.result;
+  if (response?.status !== 'success' || result?.length !== 1) return null;
+  const number = Number(result[0].value?.[1]);
+  return Number.isFinite(number) ? number : null;
+}
+
+export async function monitoringSnapshot({
+  prometheusUrl = 'http://prometheus:9090', alertmanagerUrl = 'http://alertmanager:9093',
+  grafanaUrl = 'http://grafana:3000', fetchImpl = fetch, requestTimeoutMs = 5000,
+} = {}) {
+  const get = async (base, path, json = true) => {
+    const response = await fetchImpl(new URL(path, base), { signal: AbortSignal.timeout(requestTimeoutMs) });
+    if (!response.ok) throw new Error(`Monitoring endpoint ${path} returned HTTP ${response.status}.`);
+    return json ? response.json() : response.text();
+  };
+  const query = '/api/v1/query?query=up%7Bjob%3D%22taskboard-production%22%7D';
+  const [targets, rules, promAlerts, managers, up, amAlerts, metrics, health, dashboard, grafanaQuery] = await Promise.all([
+    get(prometheusUrl, '/api/v1/targets'), get(prometheusUrl, '/api/v1/rules?type=alert'),
+    get(prometheusUrl, '/api/v1/alerts'), get(prometheusUrl, '/api/v1/alertmanagers'), get(prometheusUrl, query),
+    get(alertmanagerUrl, '/api/v2/alerts'), get(alertmanagerUrl, '/metrics', false),
+    get(grafanaUrl, '/api/health'), get(grafanaUrl, '/api/dashboards/uid/taskboard-production'),
+    get(grafanaUrl, `/api/datasources/proxy/uid/taskboard-prometheus${query}`),
+  ]);
+  if ([targets, rules, promAlerts, managers].some((result) => result.status !== 'success') || !Array.isArray(amAlerts)) {
+    throw new Error('A monitoring API returned an unsuccessful or malformed response.');
+  }
+  const selected = targets.data.activeTargets.filter((target) => target.labels.job === productionJob);
+  const requests = metricSum(metrics, 'alertmanager_notification_requests_total', metricLabels);
+  const failed = metricSum(metrics, 'alertmanager_notification_requests_failed_total', metricLabels);
+  const startedAt = metricSum(metrics, 'process_start_time_seconds');
+  if (!startedAt || failed > requests) throw new Error('Alertmanager delivery metrics are invalid.');
+  return {
+    checkedAt: new Date().toISOString(),
+    targets: selected.map(({ health: targetHealth, lastScrape, lastError }) => ({ health: targetHealth, lastScrape, lastError })),
+    up: queryValue(up),
+    rules: rules.data.groups.flatMap((group) => group.rules).filter((rule) => requiredRules.includes(rule.name))
+      .map(({ name, health: ruleHealth, lastError }) => ({ name, health: ruleHealth, lastError })),
+    prometheusAlerts: promAlerts.data.alerts.filter(productionAlert),
+    alertmanagerConnected: managers.data.activeAlertmanagers.some((manager) => manager.url === 'http://alertmanager:9093/api/v2/alerts'),
+    alertmanagerAlerts: amAlerts.filter(productionAlert),
+    email: { receiver: 'availability-email', requests, failed, succeeded: requests - failed, startedAt },
+    grafana: { database: health.database, dashboardUid: dashboard.dashboard?.uid, up: queryValue(grafanaQuery) },
+  };
+}
+
+export function phaseSatisfied(phase, snapshot, baseline) {
+  const { targets, rules, grafana, email, prometheusAlerts, alertmanagerAlerts } = snapshot;
+  const ready = snapshot.alertmanagerConnected && grafana.database === 'ok'
+    && grafana.dashboardUid === productionJob && targets.length === 1
+    && requiredRules.every((name) => rules.some((rule) => rule.name === name && rule.health === 'ok'))
+    && Date.now() - Date.parse(targets[0].lastScrape) < 30000;
+  if (!ready) return false;
+  const healthy = snapshot.up === 1 && grafana.up === 1 && targets[0].health === 'up';
+  if (phase === 'ready') return healthy && prometheusAlerts.length === 0 && alertmanagerAlerts.length === 0;
+  if (email.startedAt !== baseline.email.startedAt) throw new Error('Alertmanager restarted during the email demonstration; rerun with a fresh baseline.');
+  const delivered = email.succeeded > baseline.email.succeeded;
+  if (phase === 'firing') {
+    return snapshot.up === 0 && delivered && prometheusAlerts.some((alert) => alert.state === 'firing')
+      && alertmanagerAlerts.some((alert) => alert.status?.state === 'active'
+        && alert.status.silencedBy.length === 0 && alert.status.inhibitedBy.length === 0);
+  }
+  return healthy && delivered && prometheusAlerts.length === 0 && alertmanagerAlerts.length === 0;
+}
+
+export async function waitForMonitoring(phase, { baseline, timeoutMs = 180000, intervalMs = 2000, ...options } = {}) {
+  if (!['ready', 'firing', 'resolved'].includes(phase)) throw new Error('Expected ready, firing or resolved monitoring phase.');
+  if (phase !== 'ready' && (!baseline?.email || !Number.isFinite(baseline.email.succeeded)
+    || !Number.isFinite(baseline.email.startedAt) || baseline.email.startedAt <= 0)) {
+    throw new Error('A valid delivery baseline is required for the email demonstration.');
+  }
+  const deadline = Date.now() + timeoutMs;
+  let lastError = 'Monitoring condition has not been reached.';
+  let lastSnapshot;
+  let consecutive = 0;
+  do {
+    try {
+      lastSnapshot = await monitoringSnapshot(options);
+    } catch (error) {
+      lastError = error.message;
+      consecutive = 0;
+      await delay(intervalMs);
+      continue;
+    }
+    // Two observations avoid treating an in-flight failed SMTP attempt as a completed success.
+    consecutive = phaseSatisfied(phase, lastSnapshot, baseline) ? consecutive + 1 : 0;
+    if (consecutive >= 2) return { status: 'PASSED', phase, ...lastSnapshot,
+      emailEvidence: phase === 'ready' ? 'NOT_TESTED: no outage email was requested.'
+        : 'SMTP server accepted a notification for the availability receiver. Verify receipt in the mailbox.' };
+    lastError = `Waiting for ${phase} and its required checks${phase === 'ready' ? '' : ' and accepted email'}.`;
+    await delay(intervalMs);
+  } while (Date.now() < deadline);
+  const error = new Error(`Monitoring ${phase} timed out: ${lastError}`);
+  error.snapshot = lastSnapshot;
+  throw error;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    const baseline = process.argv[3] ? JSON.parse(readFileSync(process.argv[3], 'utf8')) : undefined;
+    const result = await waitForMonitoring(process.argv[2], { baseline,
+      prometheusUrl: process.env.PROMETHEUS_URL, alertmanagerUrl: process.env.ALERTMANAGER_URL,
+      grafanaUrl: process.env.GRAFANA_URL });
+    console.log(JSON.stringify(result, null, 2));
+  } catch (error) {
+    console.log(JSON.stringify({ status: 'FAILED', reason: error.message, snapshot: error.snapshot }, null, 2));
+    process.exitCode = 1;
+  }
+}

@@ -33,6 +33,7 @@ RUN mkdir -p /app/reports && chown node:node /app/reports
 COPY test ./test
 COPY scripts/ci-report.js ./scripts/ci-report.js
 COPY scripts/smoke-deploy.mjs ./scripts/smoke-deploy.mjs
+COPY scripts/configure-monitoring.mjs scripts/check-monitoring.mjs ./scripts/
 USER node
 CMD ["node", "scripts/ci-report.js"]
 

@@ -1,4 +1,4 @@
-// Milestone 5: promote the checked staging image to a separate production environment.
+// Seven assessed stages, including persistent production monitoring and email alerts.
 pipeline {
     agent any
     environment {
@@ -10,23 +10,38 @@ pipeline {
         PRODUCTION_PROJECT = 'sit223-hd-production'
         PRODUCTION_CONTAINER = 'sit223-hd-production'
         PRODUCTION_URL = 'http://127.0.0.1:3002'
+        MONITORING_PROJECT = 'sit223-hd-monitoring'
+        PROMETHEUS_IMAGE = 'prom/prometheus:v3.13.3'
+        ALERTMANAGER_IMAGE = 'prom/alertmanager:v0.34.1'
+        GRAFANA_IMAGE = 'grafana/grafana:13.2.2'
     }
     options {
         disableConcurrentBuilds()
-        timeout(time: 30, unit: 'MINUTES')
+        timeout(time: 45, unit: 'MINUTES')
     }
     parameters {
         booleanParam(name: 'VERIFY_STAGING_ROLLBACK', defaultValue: false,
             description: 'Demonstration only: fail Deploy after its checks and restore the previous staging image. Requires a prior successful deployment; this build will fail.')
         booleanParam(name: 'VERIFY_PRODUCTION_ROLLBACK', defaultValue: false,
             description: 'Demonstration only: fail Release after its checks and restore the previous production image. Requires a prior successful release; this build will fail. Leave staging rollback unchecked.')
+        string(name: 'SMTP_SMARTHOST', defaultValue: 'smtp.gmail.com:587', trim: true,
+            description: 'Authenticated STARTTLS SMTP host:port. Change this preset if using another provider. Credentials: monitoring-smtp.')
+        string(name: 'SMTP_FROM', defaultValue: '', trim: true,
+            description: 'Sender email address allowed by your provider. Blank uses the SMTP credential username.')
+        string(name: 'ALERT_EMAIL_TO', defaultValue: '', trim: true,
+            description: 'Required: one email address that should receive production outage and recovery notifications.')
+        booleanParam(name: 'VERIFY_MONITORING_ALERT', defaultValue: false,
+            description: 'Demonstration only: briefly stop production, verify a real outage email, restart it and verify the recovery email. Do not combine with rollback demonstrations.')
     }
     stages {
         stage('Build') {
             steps {
                 script {
-                    if (params.VERIFY_STAGING_ROLLBACK && params.VERIFY_PRODUCTION_ROLLBACK) {
-                        error('Select only one rollback demonstration per build.')
+                    if ([params.VERIFY_STAGING_ROLLBACK, params.VERIFY_PRODUCTION_ROLLBACK, params.VERIFY_MONITORING_ALERT].count { it == true } > 1) {
+                        error('Select only one demonstration per build.')
+                    }
+                    if (!params.ALERT_EMAIL_TO?.trim()) {
+                        error('Set ALERT_EMAIL_TO in Build with Parameters and add the monitoring-smtp username/password credential. The first run after merging may only refresh the parameter form.')
                     }
                     env.APP_VERSION = "build-${env.BUILD_NUMBER}"
                     env.APP_IMAGE = "sit223-hd-task-manager:${env.APP_VERSION}"
@@ -473,6 +488,20 @@ Verification: Docker health, image identity, HTTP smoke checks and Windows-host 
             post {
                 always {
                     archiveArtifacts artifacts: 'reports/release/*', allowEmptyArchive: true, fingerprint: true
+                }
+            }
+        }
+        stage('Monitoring and Alerting') {
+            options { timeout(time: 15, unit: 'MINUTES') }
+            steps {
+                script {
+                    // Separate loaded script keeps the Declarative pipeline method manageable.
+                    load 'ci/monitoring.groovy'
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/monitoring/*', allowEmptyArchive: true, fingerprint: true
                 }
             }
         }

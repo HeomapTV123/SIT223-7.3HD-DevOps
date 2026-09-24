@@ -2,7 +2,7 @@
 
 Taskboard is a small application for the SIT223 7.3HD Jenkins DevOps task. It provides real features that can be built, tested, deployed and monitored: task creation, editing, completion, deletion, searching, filtering and database persistence.
 
-The Jenkinsfile now includes **Build, Test, Code Quality, Security, Deploy, and Release**. Windows Jenkins build #6 verified the first five stages; build #7 demonstrated staging rollback and preserved the user's task. The new Release stage promotes the checked image to a separate production environment, validates it and creates a versioned release tag. Its first Windows Jenkins run is still required. Monitoring with automatic notifications remains to be implemented, followed by the demonstration video and report.
+The Jenkinsfile now defines all seven assessed stages: **Build, Test, Code Quality, Security, Deploy, Release, and Monitoring and Alerting**. Windows Jenkins build #8 verified the first six stages. Builds #7 and #9 demonstrated staging and production rollback, with existing tasks preserved. The new monitoring stage provisions Prometheus, Alertmanager email notifications and a Grafana dashboard. Its real Windows Jenkins run and received outage/recovery emails still need verification before the final video and report.
 
 ## Start here on Windows
 
@@ -16,7 +16,7 @@ Requirements already checked on your computer: Node.js 24.11.0, Git, Docker Desk
 npm test
 ```
 
-The expected result is **43 tests, 43 passed, 0 failed**: the original 37 application tests and six tests of deployment/release-check behaviour. Node.js 24.11 may print an experimental warning for its built-in SQLite module; the test exit status and final summary determine the result. No third-party npm packages are required by this application.
+The Linux/Docker test suite contains **54 tests**: 37 application tests, six deployment/release tests and 11 monitoring tests. Direct Windows `npm test` skips one Linux file-permission test; the Jenkins Docker test target runs all 54. Node.js 24.11 may print an experimental warning for its built-in SQLite module; the test exit status and final summary determine the result. No third-party npm packages are required by this application.
 
 4. Build and start the development container:
 
@@ -71,7 +71,7 @@ The application uses Node.js 24 and its built-in HTTP server, SQLite module and 
 | `src/validation.js` | Validation of task fields, dates, IDs and filters. |
 | `src/metrics.js` | Prometheus text-format metrics with fixed route labels. |
 | `public/` | Browser interface. |
-| `test/` | 43 automated validation, storage, HTTP integration and deployment/release-check tests. |
+| `test/` | 54 automated application, deployment/release and monitoring tests. |
 | `scripts/ci-report.js` | Runs tests with coverage thresholds and writes JUnit and LCOV reports. |
 | `scripts/healthcheck.js` | Checks that the running application and database are ready. |
 | `scripts/smoke-deploy.mjs` | Checks a deployed app's identity, browser assets, task operations and metrics; cleans up its temporary task. |
@@ -79,7 +79,11 @@ The application uses Node.js 24 and its built-in HTTP server, SQLite module and 
 | `compose.yaml` | Runs the local development application with persistent storage. |
 | `compose.staging.yaml` | Defines the staging environment using an existing image, a separate database volume and localhost port 3001. |
 | `compose.production.yaml` | Promotes an existing image into production, with its own database volume and localhost port 3002. |
-| `Jenkinsfile` | Build, Test, Code Quality, Security, Deploy, and Release automation for Windows Jenkins. |
+| `Jenkinsfile` | Seven-stage automation for Windows Jenkins. |
+| `ci/monitoring.groovy` | Monitoring setup, live verification and optional real outage/recovery email demonstration. |
+| `compose.monitoring.yaml`, `monitoring/` | Pinned monitoring services, scrape configuration, alert rules/tests and provisioned dashboard. |
+| `scripts/configure-monitoring.mjs` | Validates SMTP settings and installs configuration into a private Docker volume. |
+| `scripts/check-monitoring.mjs` | Checks monitoring APIs and verifies SMTP acceptance for firing/resolved alerts. |
 | `sonar-project.properties` | SonarQube Cloud project identifiers, source scope, coverage import, and quality-gate settings. |
 | `ci/secrets-report.tpl` | Produces a secret-scan report containing locations and rule details without secret values or source snippets. |
 
@@ -96,7 +100,7 @@ This command runs the same tests and produces:
 
 The coverage thresholds are 85% lines, 75% branches and 85% functions. A test or threshold failure returns a nonzero exit code so the pipeline can stop.
 
-Coverage measures the four backend modules `app.js`, `store.js`, `validation.js` and `metrics.js`, plus `scripts/smoke-deploy.mjs`. It excludes the startup entry point, frontend JavaScript and other helper scripts. These percentages therefore do not describe the entire application's coverage. The Deploy stage separately checks the running service; interactive browser behaviour still needs a manual check.
+Coverage measures the four backend modules `app.js`, `store.js`, `validation.js` and `metrics.js`, plus `scripts/smoke-deploy.mjs`, `scripts/configure-monitoring.mjs` and `scripts/check-monitoring.mjs`. It excludes the startup entry point, frontend JavaScript and other helper scripts. These percentages therefore do not describe the entire application's coverage. The Deploy stage separately checks the running service; interactive browser behaviour still needs a manual check.
 
 The automated tests check real behaviour, including task lifecycles, combined filters, incorrect input, persistence after reopening SQLite, SQL-looking input, browser security headers, cross-origin rejection, health failures and the metrics response.
 
@@ -124,7 +128,7 @@ This uses `data/tasks.db` in the project folder. It is a different database from
 
 Use the included Jenkinsfile after this folder has been committed to your own GitHub repository. Configure the new job as **Pipeline script from SCM**, with Git as SCM and `Jenkinsfile` as the script path. Jenkins checks out the repository automatically. The JUnit plugin must be installed to publish the test results.
 
-This Jenkinsfile defines six assessed stages:
+This Jenkinsfile defines seven assessed stages:
 
 1. **Build** refreshes the base images and packages, creates a runtime image tagged with the Jenkins build number, stores it in the local Docker image store, and archives its metadata and Node version.
 2. **Test** builds the test image with the same application layers and build version, runs the tests in a container, copies the reports into the Jenkins workspace and publishes them. Tests or coverage failures fail the stage. The temporary test container is removed afterward.
@@ -133,9 +137,11 @@ This Jenkinsfile defines six assessed stages:
 5. **Deploy** uses Docker Compose to run that same image in staging. It waits for Docker health, checks the deployed image ID, runs HTTP smoke checks and checks the published Windows-host port. A failed deployment triggers recovery and fails the build. Deployment evidence is archived on success or failure.
 6. **Release** requires the fetched `origin/main` commit and a successful staging result from this build. It rechecks staging's image and health, promotes that exact image ID to production, checks the service and creates a release tag containing the build number and abbreviated source commit. A failed release attempts production rollback and fails the build; release evidence is archived on success or failure.
 
+7. **Monitoring and Alerting** validates the monitoring configuration and alert rules, starts persistent collectors/dashboard/email routing, and checks live production data. An optional real outage verifies firing and recovery notifications accepted by SMTP; failure restores the app and fails the stage.
+
 Each runtime image has `APP_VERSION` set to its build identifier. The app displays that value and exposes it through `/health` and `/api/info` so a later deployment can be matched to the build that produced it.
 
-This pipeline uses Windows `bat` steps and PowerShell host-health requests, while its containers run Linux. Build #4 failed Security on image findings. Build #5 verified the smaller runtime and passed all four stages then implemented. Builds #6 and #7 passed the expanded 42-test suite, SonarQube and Security; #6 deployed staging successfully, and #7 deliberately failed Deploy and restored build #6. The new 43-test suite and Release stage need a new Windows Jenkins run. The pipeline timeout is 30 minutes; Deploy and Release each have a five-minute limit. Concurrent runs of this job are disabled. Use one Jenkins job targeting `*/main` for these fixed staging and production environments.
+This pipeline uses Windows `bat` steps and PowerShell host-health requests, while its containers run Linux. Build #4 failed Security on image findings. Build #5 verified the smaller runtime and passed all four stages then implemented. Builds #6 and #7 passed the expanded 42-test suite, SonarQube and Security; #6 deployed staging successfully, and #7 deliberately failed Deploy and restored build #6. Build #8 passed the 43 tests then present and all six stages, including production release. Build #9 demonstrated production rollback. The expanded 54-test suite and seventh stage need a new Windows Jenkins run. The pipeline timeout is 45 minutes; Deploy and Release each have five-minute limits, and Monitoring and Alerting has a 15-minute limit. Concurrent runs of this job are disabled. Use one Jenkins job targeting `*/main` for these fixed staging and production environments.
 
 ## Configure SonarQube Cloud
 
@@ -151,7 +157,7 @@ The first run downloads the official scanner image `sonarsource/sonar-scanner-cl
 
 `sonar.qualitygate.wait=true` makes the scanner poll SonarQube Cloud for up to 300 seconds after submission. A failed gate or timeout returns an error to Jenkins, blocking later stages. The connection is outbound from Jenkins, so this setup works with local Jenkins without a public webhook endpoint. The source revision is passed from Jenkins' Git checkout to identify the scanned commit. `sonar.projectVersion=1.0.0` is the application version, kept stable across CI builds; update it when preparing a new application release rather than on every build.
 
-Static analysis covers `src`, `public` and `scripts`, with `test` classified as test code. The coverage report measures four backend modules and the deployment smoke script. Uncovered frontend, bootstrap and other helper code remains visible in SonarQube's overall coverage, so it will differ from the Test stage's scoped percentages. No source files or quality rules are excluded to force a passing gate.
+Static analysis covers `src`, `public` and `scripts`, with `test` classified as test code. The coverage report measures four backend modules and the deployment smoke and monitoring scripts. Uncovered frontend, bootstrap and other helper code remains visible in SonarQube's overall coverage, so it will differ from the Test stage's scoped percentages. No source files or quality rules are excluded to force a passing gate.
 
 For assessment evidence, keep the Jenkins **Code Quality** output, the matching [SonarQube Cloud dashboard](https://sonarcloud.io/dashboard?id=HeomapTV123_SIT223-7.3HD-DevOps), quality-gate conditions and representative findings. A first analysis can establish a new-code baseline; inspect overall-code issues and coverage as well as the gate status. A successful upload by itself is not evidence that the quality gate passed.
 
@@ -248,7 +254,7 @@ The staging service runs as the image's non-root user, has a read-only root file
 
 1. Review and merge the Deploy pull request into `main`. Keep Docker Desktop running and ensure port 3001 is available.
 2. Run the existing Jenkins job. If **Build with Parameters** is shown, leave both rollback options unchecked for a normal deployment and release. The first run after merging may still show **Build Now** until Jenkins loads the parameter definitions.
-3. Confirm all 43 tests and both gates pass, followed by the fifth stage, **Deploy**. Compose waits up to 90 seconds for the image's health check; startup failure or timeout blocks the stage. After Deploy succeeds, Release runs automatically.
+3. Confirm all 54 tests and both gates pass, followed by the fifth stage, **Deploy**. Compose waits up to 90 seconds for the image's health check; startup failure or timeout blocks the stage. After Deploy succeeds, Release runs automatically.
 4. Open `http://localhost:3001` on the Jenkins computer. The page should identify the environment as `staging` and show the current `build-N` version. Open `/health` to confirm those values and `status: ok`.
 5. Create a task manually and refresh the page. After another normal Jenkins deployment, confirm that task is still there. The named volume is reused; the pipeline's smoke checks delete only the temporary task they create.
 6. Save the pipeline screenshot, staging page and the build's **Artifacts > reports > deploy** files. The archive page can download that directory as a ZIP.
@@ -290,14 +296,14 @@ Production must pass Docker health, the same seven HTTP smoke checks and a healt
 
 The app continues to display `build-N`; the archived release manifest links that version to the release tag and full source commit. Images and tags are kept in this Docker engine's local image store. No registry upload or Git tag is created. Docker tags remain mutable outside the pipeline, so the archived image ID is the authoritative artifact identity. Keep prior release images available for rollback.
 
-### First release and evidence
+### Release and evidence
 
-1. Review and merge the Release pull request into `main`. Keep Docker Desktop running and ensure port 3002 is available.
+1. Use the merged pipeline on `main`. Keep Docker Desktop running and ensure port 3002 is available. Configure the monitoring email credential and parameters below before a complete seven-stage run.
 2. Open the existing Jenkins job's **Build with Parameters**. Leave **VERIFY_STAGING_ROLLBACK** unchecked, and leave **VERIFY_PRODUCTION_ROLLBACK** unchecked if it is already shown. The new parameter may appear only after Jenkins first loads the updated Jenkinsfile.
-3. Run the complete pipeline. Confirm 43 tests and all six assessed stages pass. The automatic **Checkout SCM** step does not count as an assessed stage.
+3. Run the complete pipeline. Confirm 54 tests and all seven assessed stages pass. The automatic **Checkout SCM** step does not count as an assessed stage.
 4. Open `http://localhost:3001` and `http://localhost:3002`. Both should show the current `build-N`, with `staging` and `production` respectively. `/health` on port 3002 must return `status: ok`, the current version and `environment: production`.
 5. Production initially has its own empty task list. Create a task called `Production check`, refresh the page and confirm it remains. Confirm it does not appear in staging, and that the earlier staging task still exists there. After another successful release, confirm the production task remains too.
-6. Save the six-stage pipeline screenshot, both browser pages, and **Build Artifacts > reports > release**. Read `release-result.txt` and `release-manifest.txt`; compare the image ID with `reports/security/scan-context.txt`, `reports/deploy/deployment-result.txt` and `promoted-from-staging.json`.
+6. Save the complete pipeline screenshot, both browser pages, and **Build Artifacts > reports > release**. Read `release-result.txt` and `release-manifest.txt`; compare the image ID with `reports/security/scan-context.txt`, `reports/deploy/deployment-result.txt` and `promoted-from-staging.json`.
 
 | Release artifact | Purpose |
 | --- | --- |
@@ -321,13 +327,75 @@ If a failure occurs after release-tag creation, Jenkins attempts to remove that 
 
 Rollback restores the previous application image using the current production Compose configuration. It does not revert database contents, schema or configuration changes. Replacing a single container causes brief downtime. Keep schema changes backward compatible or provide a separately reviewed migration/recovery procedure. Do not delete either data volume or prune previous release images to resolve a failed release. For a port conflict, free port 3002 or change both the Compose mapping and `PRODUCTION_URL` consistently.
 
-## Remaining stages to implement
+## Run Monitoring and Alerting with email
 
-| Assessed stage | Next implementation |
+The seventh stage deploys `prom/prometheus:v3.13.3`, `prom/alertmanager:v0.34.1` and `grafana/grafana:13.2.2`. These are pinned release tags; archived `monitor-images.json` records their resolved image IDs/digests. They run after Release and remain running when Jenkins finishes. Prometheus scrapes production every 10 seconds through its Docker network; no Docker socket is exposed to monitoring containers. Grafana receives a provisioned Prometheus datasource and nine-panel dashboard covering availability, uptime, memory, request rate, server errors, mean HTTP duration, task counts, alert states and email failures.
+
+| Service | Local URL | Storage |
+| --- | --- | --- |
+| Grafana dashboard | `http://localhost:3003/d/taskboard-production` | `sit223-hd-monitoring_grafana-data` |
+| Prometheus targets and alerts | `http://localhost:9090/targets`, `/alerts` | `sit223-hd-monitoring_prometheus-data` |
+| Alertmanager alerts | `http://localhost:9093` | `sit223-hd-monitoring_alertmanager-data` |
+
+All ports bind to localhost. Grafana allows anonymous **Viewer** access, disables login and sign-up, and creates no default admin account. This is a local coursework dashboard. Prometheus retains up to seven days or 512 MB of time-series blocks. All three services retain state in separate volumes, restart unless explicitly stopped, and use bounded Docker logs. Re-running the stage recreates the monitoring containers to apply the checked-in configuration while retaining their data. Brief gaps and reset process counters can occur during recreation.
+
+### Configure the email receiver
+
+1. Obtain SMTP credentials from your mail provider. This implementation uses authenticated **STARTTLS**, normally port **587**. Implicit TLS on port 465 is unsupported. The default host is a Gmail preset; change it for another provider.
+2. For a personal Gmail account, enable **2-Step Verification**, then create an [App Password](https://support.google.com/accounts/answer/185833). Use that app password with the full Gmail address. App passwords may be unavailable for some managed accounts, security-key-only configurations or Advanced Protection. If unavailable, use a provider/account with supported SMTP credentials. Do not use the normal Google account password.
+3. In **Manage Jenkins > Credentials > System > Global credentials > Add Credentials**, select **Username with password**, with ID **`monitoring-smtp`**. Username is the SMTP login; Password is the provider's app/SMTP password. Leave the existing `sonarcloud-token` credential in place. Credentials Binding must be enabled. Jenkins mail plugins are not required: Alertmanager sends the emails.
+4. Review and merge the monitoring PR. Open **Build with Parameters**. The first run after merging may stop immediately with `Set ALERT_EMAIL_TO...` because Jenkins has only just loaded the new parameter definitions. Reopen the parameter form after that refresh.
+5. Set the parameters below and run the pipeline. Keep all three demonstration checkboxes off for the first normal run.
+
+| Parameter | Value |
 | --- | --- |
-| Monitoring and Alerting | Collect the application's metrics with Prometheus, configure alert rules and a working notification receiver, then demonstrate a failure and recovery. |
+| `SMTP_SMARTHOST` | For Gmail: `smtp.gmail.com:587`; otherwise the provider's STARTTLS SMTP host and port |
+| `SMTP_FROM` | Sender address authorized by the provider; leave blank to use the credential username |
+| `ALERT_EMAIL_TO` | One real recipient address whose inbox you can check |
+| `VERIFY_MONITORING_ALERT` | Unchecked for normal monitoring setup; checked only for the intentional outage demonstration |
 
-The current `/metrics` endpoint and its deployment/release checks are preparation for monitoring. A running collector and actual alert delivery are still required. Release automation is now prepared and needs its real Windows Jenkins verification before monitoring is added.
+Supply the receiver parameters whenever starting a build; the checked-in defaults do not contain your email address. A temporary container validates these settings and writes Alertmanager configuration plus a mode-0400 password file into `sit223-hd-monitoring_private-config`. It runs without network access, inherits the credential by environment-variable name and is removed afterward. The persistent Alertmanager container reads the private volume without receiving the password in its environment. The password is not written to Git, the Jenkins workspace or archived reports. Docker administrators can access this volume; keep it for monitoring restarts, and rotate credentials in Jenkins then rerun the stage when necessary. Do not attach its contents to evidence or delete it while Alertmanager needs it.
+
+The stage runs the pinned `promtool` configuration validator and **six alert-rule test scenarios**, then validates the generated Alertmanager configuration with `amtool`. It checks a fresh production scrape, all three healthy rules, Prometheus's Alertmanager connection, Grafana's dashboard and an actual datasource query. Any failed check fails the stage. A normal green run records `Email delivery: NOT_TESTED`; it verifies monitoring readiness without claiming that an email was delivered.
+
+### Alert policy
+
+| Alert | Condition | Delay before firing |
+| --- | --- | --- |
+| `TaskboardDown` | Production scrape is down or its `up` series is absent | 1 minute |
+| `TaskboardHighErrorRate` | More than 5% application requests are HTTP 5xx over five minutes, with at least 20 requests in that window; health/metrics polls excluded | Condition persists for 2 minutes |
+| `TaskboardHighMemory` | Node resident memory exceeds 256 MiB | 5 minutes |
+
+Alertmanager groups by alert name and environment, waits 10 seconds before a group's first email, and checks group changes every 15 seconds. It repeats ongoing alerts hourly and explicitly sends recovery emails. These are demonstration thresholds, chosen to avoid low-volume error noise and momentary restarts; tune them to measured workload and service objectives for other deployments. Availability emails use a dedicated receiver so the demonstration can distinguish them from error-rate or memory notifications.
+
+### Demonstrate a real outage and recovery
+
+1. Complete one normal seven-stage run. Open Grafana, confirm live production metrics, and create or retain a `Production check` task at `http://localhost:3002`.
+2. Start **Build with Parameters**, provide the same SMTP/receiver settings, and check only **VERIFY_MONITORING_ALERT**. Leave both rollback options unchecked. This intentionally makes the local production app unavailable for roughly one to three minutes; staging remains running.
+3. After a successful release and monitoring readiness check, Jenkins confirms production ownership, image and health, then stops the production container. Prometheus must fire `TaskboardDown`, Alertmanager must show it active and unsilenced, and the dedicated email receiver must record a successful SMTP request. Failed SMTP attempts do not count as delivery.
+4. Jenkins restarts that same production container in a `finally` block, including when the outage/email check fails. It verifies Docker health, unchanged image ID, environment and build version. On success it then waits for the alert to clear and for another successful SMTP request for the resolved notification.
+5. In the recipient mailbox, confirm both **`[Taskboard FIRING] TaskboardDown`** and **`[Taskboard RESOLVED] TaskboardDown`**. Check spam if necessary. Refresh production and confirm the current build version and existing task remain. Unlike the rollback demonstrations, a successful email demonstration ends green.
+6. Save the seven-stage pipeline screenshot, dashboard with the visible outage, both actual emails, and **Build Artifacts > reports > monitoring**. Leave the outage option off for future normal runs.
+
+The checker compares completed SMTP requests minus failed requests before and after each phase, requires two consecutive observations, and rejects an Alertmanager restart during the demonstration. It confirms **SMTP acceptance**, not final inbox placement. Only actual received emails establish receiver delivery. No simulated alert is submitted to manufacture a passing result.
+
+| Monitoring artifact | Purpose |
+| --- | --- |
+| `monitoring-context.txt`, `monitor-images.json`, `compose-resolved.yaml` | Build/commit/image context and deployed monitoring configuration |
+| `prometheus-config-check.txt`, `alert-rule-tests.txt`, `alertmanager-config-check.txt` | Real pinned-tool configuration/rule validation results |
+| `monitoring-ready.json`, `monitoring-result.txt` | Live API checks and overall stage result |
+| `email-result.txt` | `NOT_TESTED`, `SMTP_ACCEPTED`, or failed/unverified demonstration outcome |
+| `alert-firing.json`, `alert-resolved.json` | Alert state, receiver counters and check timestamps when the optional demonstration runs |
+| `production-recovery.txt`, `recovered-health.json` | Same production image restored to health after the intentional stop |
+| `monitoring-services.txt`, `monitoring-services.log` | Service state and bounded diagnostics, including SMTP failures |
+
+### Failure handling and limits
+
+An invalid mail credential, rejected SMTP authentication or blocked outbound port fails the optional demonstration. Production restart is attempted before the error is propagated. Read the monitoring logs, correct the credential/provider settings and rerun. Missing reports or `NOT_COMPLETED` never establish success. The monitoring failure occurs after Release; it does not undo the completed production release or its tag. During a failed setup, inspect whether older monitoring services are still running before assuming notifications are available.
+
+A hard Jenkins timeout, agent loss or Docker shutdown can interrupt recovery. If production remains stopped, run `docker start sit223-hd-production`, wait for its Docker health check, then open `http://localhost:3002/health` and inspect the latest reports. This restarts the existing container and preserves its data. Do not delete the production database volume as a recovery step.
+
+Monitoring shares the same Windows machine and Docker engine as the app. It can detect an app/container outage while that engine is running; it cannot email about failure of its own host, Docker engine, Prometheus or Alertmanager. A separate external monitor and a durable external deployment would be needed for that failure scope. The Security stage scans the Taskboard runtime and source; it does not scan the three monitoring images. Their pinned versions/metadata are evidence of identity, not proof that they contain no vulnerabilities.
 
 ## Assessment evidence to collect as we progress
 
@@ -351,7 +419,11 @@ Build #7 passed the same tests/gates and deliberately failed Deploy after its ch
 
 The Release change adds a test that runs the production smoke CLI against a real local HTTP server, checks production identity, verifies the successful exit/report and confirms preservation of an existing task. It also checks that a staging identity expectation is rejected before task changes. All 43 tests passed locally on Node.js 24.19.0, with 100% lines, 99.48% branches and 100% functions across the four backend modules and smoke script. The generated JUnit contains 43 cases without failures or errors, and all five LCOV source paths resolve. The three Compose files parse with separate project names, ports and volume mounts; these are static configuration checks, not Docker execution.
 
-Docker, Jenkins, Windows PowerShell and Trivy execution are unavailable in the preparation environment. Production Compose launch, host-port checks, release tagging and production rollback still need real Windows Jenkins runs. Local application tests and static configuration checks do not establish that those integration steps succeeded. Generate and use those real release reports for assessment evidence.
+The user's Windows Jenkins build #8 passed the 43-test suite and all six stages then present. It released `build-8` with image `sha256:cbe75390d5e52a5a4f5ee8b83ad5147951d97ddb2ed672512ae862c6dcb60d4c`. Build #9 deliberately failed Release and restored that previous healthy image. The subsequent browser screenshot showed production `build-8` at port 3002 with the `Production check` task retained. This verifies production promotion and image rollback for those runs.
+
+The monitoring change expands the suite to 54 tests. Local Node.js 24.19.0 execution passed all 54 with no failures: 99.69% lines, 98.09% branches and 100% functions across the seven scoped source files. JUnit parses successfully, all seven LCOV paths resolve, and monitoring YAML/dashboard JSON parse. Monitoring tests exercise real local HTTP endpoints, rejected/malformed settings, private-file rotation, failed SMTP counter handling, pending/silenced alerts, fresh-data requirements, service failures, timeouts, restart detection and CLI exit/report behaviour.
+
+Docker, Jenkins, Windows PowerShell, Prometheus, Alertmanager and Grafana are unavailable in the preparation environment. The checked-in `promtool` scenarios and Windows monitoring orchestration must run on the user's machine; they have not been executed here. Local fixtures simulate the service API responses and do not send email. Real service startup, dashboard rendering, the deliberate outage/recovery and actual received emails remain required for the seventh stage's evidence.
 
 ## Technical references
 
@@ -374,3 +446,10 @@ Docker, Jenkins, Windows PowerShell and Trivy execution are unavailable in the p
 - [Trivy report conversion and severity gate options](https://trivy.dev/docs/latest/guide/references/configuration/cli/trivy_convert/)
 - [Trivy secret scanning and built-in exclusions](https://trivy.dev/docs/latest/guide/scanner/secret/)
 - [Trivy Alpine vulnerability-coverage limitations](https://trivy.dev/docs/v0.74/guide/coverage/os/alpine/)
+
+- [Prometheus alerting rules](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/)
+- [Prometheus rule unit tests](https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/)
+- [Alertmanager email and routing configuration](https://prometheus.io/docs/alerting/latest/configuration/)
+- [Grafana provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/)
+- [Google App Passwords](https://support.google.com/accounts/answer/185833)
+- [Gmail SMTP settings](https://support.google.com/mail/answer/7104828)
